@@ -27,6 +27,13 @@ jobs:
     name: Prove and register
     runs-on: ubuntu-latest
     steps:
+      # Only the helper script is needed. Nothing in this job reads the rest of the repository, and
+      # the checkout is what makes `.github/scripts/app-token.mjs` present on disk.
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+
       - name: Parse the request
         id: parse
         env:
@@ -153,6 +160,13 @@ jobs:
         run: |
           set -euo pipefail
 
+          # A registry that has not been deployed and wired up yet is an operator state, not a
+          # problem with the request. Report it as one rather than failing inside `cast`.
+          if [ -z "${RIK_ADDRESS:-}" ] || [ -z "${RPC_URL:-}" ] || [ -z "${REGISTRAR_PRIVATE_KEY:-}" ]; then
+            echo "status=unconfigured" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
           # Ask the contract what audience to request, rather than reimplementing the encoding here.
           # The two cannot drift apart if only one of them defines the format.
           audience="$(cast call "$RIK_ADDRESS" "audienceOf(address,uint256,uint256)(string)" \
@@ -234,6 +248,8 @@ jobs:
           \`\`\`
           TEXT
           )
+          elif [ "$REGISTER_STATUS" = "unconfigured" ]; then
+            body="Control of \`$SLUG\` was confirmed via \`$CONTROL_METHOD\`, but this repository has no registry configured yet, so nothing was submitted. Re-open once \`FCF_RIK_ADDRESS\`, \`FCF_RPC_URL\` and \`FCF_REGISTRAR_PRIVATE_KEY\` are set."
           elif [ "$REGISTER_STATUS" = "rejected" ]; then
             body=$(printf 'Control confirmed via `%s`, but the chain rejected the registration:\n\n```\n%s\n```' "$CONTROL_METHOD" "$REGISTER_REASON")
           elif [ "$REGISTER_STATUS" = "ok" ]; then
@@ -242,8 +258,8 @@ jobs:
             body="Something went wrong before the registration ran. Check the workflow logs."
           fi
 
-          gh issue comment "$ISSUE" --body "$body"
+          gh issue comment "$ISSUE" --repo "$GITHUB_REPOSITORY" --body "$body"
 
           if [ "$REGISTER_STATUS" = "ok" ]; then
-            gh issue close "$ISSUE"
+            gh issue close "$ISSUE" --repo "$GITHUB_REPOSITORY"
           fi
