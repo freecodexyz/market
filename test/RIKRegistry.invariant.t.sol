@@ -71,8 +71,8 @@ contract RegistryHandler is Test {
         return _actors[seed % _actors.length];
     }
 
-    /// @dev The happy path. Registering an already-registered repository is left in deliberately,
-    ///      because it is the case that must keep failing forever.
+    /// @dev The success path. Registering an already-registered repository is included because it
+    ///      must continue to fail.
     function register(uint256 seed) external {
         registerAttempts++;
         Proof storage p = _proof(seed);
@@ -81,8 +81,8 @@ contract RegistryHandler is Test {
 
         try _rik.register(p.kid, p.header, p.payload, p.signature, p.repoId, p.ownerId, p.actorId, p.wallet) {
             if (already) {
-                // A second registration must be impossible; that is what stops a repository owner
-                // taking the key back from someone who bought it.
+                // A second registration must be impossible, or a repository owner could reclaim a
+                // key that has been sold.
                 forbiddenRegistrationSucceeded = true;
                 return;
             }
@@ -272,7 +272,7 @@ contract RIKRegistry_Invariant is OidcFixture {
         assertEq(held, registered);
     }
 
-    /// @dev Guards against a silently no-op handler making the invariants vacuous.
+    /// @dev Fails if the handler never reached a path, which would make the invariants trivial.
     function afterInvariant() public view {
         assertGt(handler.registerAttempts(), 0);
         assertGt(handler.rejectedAttempts(), 0);

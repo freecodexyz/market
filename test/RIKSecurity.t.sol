@@ -62,8 +62,8 @@ contract RIKSecurity_T is OidcFixture {
     /**
      * @dev Builds a payload the way a JSON encoder would, from parts a hostile verifier controls.
      *
-     * `freeText` stands in for the workflow name, which GitHub copies into the token verbatim and is
-     * therefore the natural place to attempt claim injection.
+     * `freeText` represents the workflow name, which GitHub copies into the token verbatim and is
+     * therefore where claim injection would be attempted.
      */
     function _payload(
         string memory audience,
@@ -89,7 +89,7 @@ contract RIKSecurity_T is OidcFixture {
         );
     }
 
-    /// @dev A payload that satisfies every check, for the cases that are about something else.
+    /// @dev A payload satisfying every check, for tests concerned with something else.
     function _validPayload() internal view returns (bytes memory) {
         return _payload(rik.audienceOf(alice, REPO_ID, OWNER_ID), ACTOR_ID, "issues", WORKFLOW_REF, "Register");
     }
@@ -103,9 +103,9 @@ contract RIKSecurity_T is OidcFixture {
 
     // --- receiver safety ----------------------------------------------------
 
-    /// @dev The key is transferable and carries a repository's royalties. Minting one into a
-    ///      contract that cannot move it would strand the market permanently, and re-opening the
-    ///      issue costs nothing.
+    /// @dev The key is transferable and carries a repository's royalties, so minting one into a
+    ///      contract that cannot transfer it would strand the market permanently. A rejected
+    ///      registration can be retried.
     function test_RejectsContractThatCannotReceiveKeys() public {
         MockERC20 notAReceiver = new MockERC20("Not A Wallet", "NAW");
         Fixture memory f = _proofFor(REPO_ID, address(notAReceiver));
@@ -132,8 +132,7 @@ contract RIKSecurity_T is OidcFixture {
         _register(f, REPO_ID, address(rejecting));
     }
 
-    /// @dev A smart-contract wallet is the expected holder of a valuable key, so this is the case
-    ///      that has to work.
+    /// @dev A smart-contract wallet is an expected holder, so this case must succeed.
     function test_AcceptsCompliantContractWallet() public {
         CompliantReceiver wallet = new CompliantReceiver();
         Fixture memory f = _proofFor(REPO_ID, address(wallet));
@@ -143,7 +142,7 @@ contract RIKSecurity_T is OidcFixture {
         assertEq(rik.ownerOf(REPO_ID), address(wallet));
     }
 
-    /// @dev A failed delivery leaves nothing behind, so the repository can simply try again.
+    /// @dev A failed delivery leaves no state behind, so the repository can be registered again.
     function test_FailedDeliveryLeavesNoRecord() public {
         RejectingReceiver rejecting = new RejectingReceiver();
         Fixture memory f = _proofFor(REPO_ID, address(rejecting));
@@ -159,8 +158,8 @@ contract RIKSecurity_T is OidcFixture {
     // --- reentrancy through the mint hook -----------------------------------
 
     /// @dev The receiver hook runs after every state change, so a nested registration of the same
-    ///      repository sees a consistent registry and is refused. This is what stands in for a
-    ///      reentrancy guard on `register`.
+    ///      repository observes a consistent registry and is refused. This replaces a reentrancy
+    ///      guard on `register`.
     function test_ReentrantRegistrationCannotDoubleRegister() public {
         ReenteringReceiver receiver = new ReenteringReceiver();
         Fixture memory f = _proofFor(REPO_ID, address(receiver));
@@ -181,9 +180,9 @@ contract RIKSecurity_T is OidcFixture {
         assertEq(rik.balanceOf(address(receiver)), 1);
     }
 
-    /// @dev Registering a *different* repository from inside the hook is legitimate, and a blanket
-    ///      reentrancy guard would have broken it. A factory claiming several repositories in one
-    ///      call is the obvious use.
+    /// @dev Registering a different repository from inside the hook is valid, and a blanket
+    ///      reentrancy guard would prevent it. A factory claiming several repositories in one call
+    ///      is one such case.
     function test_ReentrantRegistrationOfAnotherRepositorySucceeds() public {
         ReenteringReceiver receiver = new ReenteringReceiver();
         Fixture memory first = _proofFor(REPO_ID, address(receiver));
@@ -216,10 +215,9 @@ contract RIKSecurity_T is OidcFixture {
 
     // --- the verifier trust boundary ----------------------------------------
 
-    /// @dev Stated plainly, because it is the top of the risk model: the registry believes whatever
-    ///      the verifier hands it. A compromised verifier owner can mint any repository's key to
-    ///      any wallet, which is why that key lives in the identity repository and is kept
-    ///      dedicated to the sync job.
+    /// @dev The top of the risk model: the registry accepts whatever the verifier returns. A
+    ///      compromised verifier owner can mint any repository's key to any wallet, which is why
+    ///      that key lives in the identity repository and is dedicated to the sync job.
     function test_VerifierIsTheRootOfTrust() public {
         RIK trusting = _configured(new ScriptedVerifier(_validPayload()));
         trusting.register(bytes32(0), "", "", "", REPO_ID, OWNER_ID, ACTOR_ID, alice);
@@ -287,12 +285,12 @@ contract RIKSecurity_T is OidcFixture {
     // --- the JSON encoding assumption ---------------------------------------
 
     /**
-     * @dev The assumption the whole matcher rests on, stated as an executable fact.
+     * @dev Records the assumption the matcher depends on.
      *
-     * A payload is only ever produced by a JSON encoder, which escapes `"` inside a value. Hand one
-     * to the registry that does not, and a claim really can be forged out of free text. Nothing in
-     * the contracts can prevent that, which is exactly why the trust boundary sits at the verifier
-     * and why {ClaimMatcher} must never be changed to match anything looser than an exact byte run.
+     * A payload is produced by a JSON encoder, which escapes `"` inside a value. Given a payload
+     * that does not, a claim can be forged from free text. No contract-level check prevents this,
+     * which is why the trust boundary is the verifier and why {ClaimMatcher} must not be changed to
+     * match anything looser than an exact byte run.
      */
     function test_UnescapedQuoteInARawPayloadWouldForgeTheEventClaim() public {
         // The workflow name is attacker-controlled. Unescaped, it closes its own string and writes
@@ -322,7 +320,7 @@ contract RIKSecurity_T is OidcFixture {
     /**
      * @dev No payload whose `event_name` is anything but `issues` ever registers.
      *
-     * Values are constrained to be quote-free, which is what a JSON encoder guarantees and what
+     * Values are constrained to be quote-free, which a JSON encoder guarantees and which
      * {test_UnescapedQuoteInARawPayloadWouldForgeTheEventClaim} shows is load-bearing.
      */
     /// forge-config: default.fuzz.runs = 512
@@ -341,7 +339,7 @@ contract RIKSecurity_T is OidcFixture {
         trusting.register(bytes32(0), "", "", "", REPO_ID, OWNER_ID, ACTOR_ID, alice);
     }
 
-    /// @dev The audience is the whole claim, so no triple but the attested one is ever bound.
+    /// @dev The audience carries the entire claim, so only the attested triple can be bound.
     /// forge-config: default.fuzz.runs = 512
     /// forge-config: deep.fuzz.runs = 10000
     function testFuzz_OnlyTheAttestedTripleEverRegisters(address wallet, uint64 repoId, uint64 ownerId) public {
@@ -357,7 +355,7 @@ contract RIKSecurity_T is OidcFixture {
         trusting.register(bytes32(0), "", "", "", repoId, ownerId, ACTOR_ID, wallet);
     }
 
-    /// @dev And no actor but the one GitHub named is ever credited.
+    /// @dev Only the actor GitHub named is credited.
     /// forge-config: default.fuzz.runs = 512
     /// forge-config: deep.fuzz.runs = 10000
     function testFuzz_OnlyTheAttestedActorEverRegisters(uint64 actorId) public {

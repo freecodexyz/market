@@ -98,9 +98,9 @@ const jti = fixture.jti ?? "00000000-0000-0000-0000-000000000000";
 // a fixture can attempt a malformed or redirected audience.
 const audience = fixture.aud ?? `${wallet}:${repoId}:${ownerId}`;
 
-// Attacker-controlled free text. GitHub copies the issue-derived workflow name into the token
-// verbatim, so this is the natural place to attempt claim injection. A JSON encoder escapes the
-// quotes, which is exactly what the claim matcher relies on.
+// Attacker-controlled free text. GitHub copies the workflow name into the token verbatim, so this
+// is where claim injection would be attempted. A JSON encoder escapes the quotes, which is the
+// property the claim matcher depends on.
 const workflowName = fixture.workflowName ?? "Register Repository";
 
 const privateKey = createPrivateKey(TEST_RSA_PRIVATE_KEY);

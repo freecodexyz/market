@@ -6,7 +6,7 @@ pragma solidity ^0.8.24;
  * @title IRIKRoyaltySplitter
  * @notice The one call {RIKLauncher} makes into the splitter.
  *
- * @dev Declared separately so the launcher and the splitter can be immutably wired to each other
+ * @dev Declared separately so the launcher and the splitter can be wired to each other immutably
  *      without either importing the other's implementation.
  */
 interface IRIKRoyaltySplitter {

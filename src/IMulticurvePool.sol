@@ -7,8 +7,8 @@ pragma solidity ^0.8.24;
  * @notice The Doppler pool surface {RIKRoyaltySplitter} collects trading fees through.
  *
  * @dev A pool reached through this interface is untrusted. `token0` and `token1` are used only to
- *      look up which repository the pool belongs to, and {collectFees} pays whatever it pays; the
- *      splitter measures a balance delta rather than believing a reported amount.
+ *      determine which repository the pool belongs to. The splitter measures a balance delta across
+ *      {collectFees} rather than relying on any amount the pool reports.
  */
 interface IMulticurvePool {
     /// @notice Returns the lower-sorted token of the pair.

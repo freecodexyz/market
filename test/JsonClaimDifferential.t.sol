@@ -11,8 +11,8 @@ import {JsonClaim} from "../src/JsonClaim.sol";
 /**
  * @dev The byte-at-a-time search {JsonClaim-indexOf} replaced, kept verbatim as an oracle.
  *
- * Obviously correct and obviously slow, which is exactly what an oracle should be. Do not optimise
- * it, and do not make it share code with the implementation under test.
+ * Straightforwardly correct and slow. Do not optimise it, and do not let it share code with the
+ * implementation under test.
  */
 library ReferenceSearch {
     function indexOf(bytes memory hay, bytes memory needle) internal pure returns (int256) {

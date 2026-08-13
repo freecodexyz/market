@@ -14,9 +14,9 @@ import {RIKRoyaltySplitter} from "../src/RIKRoyaltySplitter.sol";
  * @dev Runs the deploy scripts in-process, without broadcasting.
  *
  * The launcher and the splitter can only be wired to each other through a predicted CREATE address,
- * and a wrong prediction produces contracts that compile, deploy and then quietly send every fee to
- * an address with no code. That failure is invisible in a unit test of either contract, so the
- * script itself is what needs covering.
+ * and an incorrect prediction produces contracts that compile, deploy, and then send every fee to
+ * an address with no code. That failure is not visible in a unit test of either contract, so the
+ * script itself requires coverage.
  */
 contract DeployScripts_T is Test {
     uint256 constant DEPLOYER_KEY = 0xA11CE;
@@ -75,7 +75,7 @@ contract DeployScripts_T is Test {
         assertEq(rik.owner(), RIK_OWNER);
     }
 
-    /// @dev The point of the whole script: each contract ends up holding the other's real address.
+    /// @dev The purpose of the script: each contract ends up holding the other's actual address.
     function test_DeployMarketWiresLauncherAndSplitterToEachOther() public {
         RIK rik = new DeployRIK().run();
         vm.setEnv("RIK_ADDRESS", vm.toString(address(rik)));

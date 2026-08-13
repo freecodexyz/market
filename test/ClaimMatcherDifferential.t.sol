@@ -12,8 +12,8 @@ import {JsonClaim} from "../src/JsonClaim.sol";
 /**
  * @dev The byte-at-a-time search both implementations replaced, kept verbatim as an oracle.
  *
- * Obviously correct and obviously slow, which is exactly what an oracle should be. Do not optimise
- * it, and do not make it share code with either implementation under test.
+ * Straightforwardly correct and slow. Do not optimise it, and do not let it share code with either
+ * implementation under test.
  */
 library NaiveSearch {
     function indexOf(bytes memory hay, bytes memory needle) internal pure returns (int256) {

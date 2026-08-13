@@ -178,7 +178,7 @@ contract SystemHandler is Test {
         } catch {}
     }
 
-    /// @dev Keys change hands while their buckets are full, which is the whole point of the design.
+    /// @dev Keys change hands while their buckets are non-empty, which the design must support.
     function transferKey(uint256 repoSeed, uint256 toSeed) external {
         transfers++;
         (uint256 repoId,) = _repo(repoSeed);
@@ -302,8 +302,8 @@ contract MarketSystem_Invariant is MarketFixture {
         }
     }
 
-    /// @dev Whatever the splitter says it owes, it holds. This is what makes every {claim} payable
-    ///      and keeps one repository from being paid out of another's earnings.
+    /// @dev The splitter holds whatever it reports as owed. This keeps every {claim} payable and
+    ///      prevents one repository being paid from another's earnings.
     function invariant_EveryBucketIsBacked() public view {
         for (uint256 t = 0; t < tokens.length; ++t) {
             address token = tokens[t];
@@ -337,7 +337,7 @@ contract MarketSystem_Invariant is MarketFixture {
         assertFalse(handler.strangerWasPaid());
     }
 
-    /// @dev Guards against a silently no-op handler making the invariants vacuous.
+    /// @dev Fails if the handler never reached a path, which would make the invariants trivial.
     function afterInvariant() public view {
         assertGt(handler.launches(), 0);
         assertGt(handler.collections(), 0);

@@ -13,7 +13,7 @@ import {RIKRoyaltySplitter} from "../../src/RIKRoyaltySplitter.sol";
 
 // --- ERC-721 receivers ------------------------------------------------------
 
-/// @dev Accepts ERC-721s properly. The baseline a smart-contract wallet has to meet.
+/// @dev Accepts ERC-721 transfers correctly, as a smart-contract wallet is expected to.
 contract CompliantReceiver is IERC721Receiver {
     function onERC721Received(address, address, uint256, bytes calldata) external pure returns (bytes4) {
         return IERC721Receiver.onERC721Received.selector;
@@ -58,7 +58,7 @@ contract ReenteringReceiver is IERC721Receiver {
     function onERC721Received(address, address, uint256, bytes calldata) external returns (bytes4) {
         if (_reentrantCall.length != 0 && !reentered) {
             reentered = true;
-            // Raw call so a revert inside the nested registration does not take this one down.
+            // Raw call so a revert in the nested registration does not revert the outer one.
             (bool ok,) = address(_rik).call(_reentrantCall);
             reentrySucceeded = ok;
         }
@@ -68,8 +68,8 @@ contract ReenteringReceiver is IERC721Receiver {
 
 // --- verifiers --------------------------------------------------------------
 
-/// @dev Returns whatever payload it is told to. Stands in for a compromised verifier, which is the
-///      root of trust the whole registry rests on.
+/// @dev Returns a caller-supplied payload. Represents a compromised verifier, which the registry
+///      trusts completely.
 contract ScriptedVerifier is IJwtVerifier {
     bytes private _payload;
 
@@ -86,7 +86,7 @@ contract ScriptedVerifier is IJwtVerifier {
     }
 }
 
-/// @dev Always rejects, so the failure has to propagate out of `register`.
+/// @dev Always reverts, so the failure must propagate out of `register`.
 contract RevertingVerifier is IJwtVerifier {
     error Nope();
 
@@ -103,11 +103,11 @@ contract RevertingVerifier is IJwtVerifier {
  * @dev Tries to write storage while verifying.
  *
  * {IJwtVerifier-verifyGithubOidc} is declared `view`, so the compiler reaches it with STATICCALL and
- * this cannot succeed. That is what makes the verifier unable to reenter the registry, and it is
- * worth pinning: relaxing the interface to non-view would silently remove the protection.
+ * this cannot succeed, so the verifier cannot reenter the registry. Relaxing the interface to
+ * non-view would remove that protection without any other visible change.
  *
- * It deliberately does not inherit {IJwtVerifier}, because Solidity forbids implementing a `view`
- * interface function with a state-changing one — which is itself part of the guarantee.
+ * It does not inherit {IJwtVerifier}: Solidity forbids implementing a `view` interface function
+ * with a state-changing one, which is part of the same guarantee.
  */
 contract StateWritingVerifier {
     uint256 public calls;
@@ -120,7 +120,7 @@ contract StateWritingVerifier {
 
 // --- tokens -----------------------------------------------------------------
 
-/// @dev Reverts on transfer. A bucket must survive a payout that could not be delivered.
+/// @dev Reverts on transfer, so a bucket must survive a payout that could not be delivered.
 contract RevertingERC20 is ERC20 {
     error TransferDisabled();
 
@@ -142,7 +142,7 @@ contract RevertingERC20 is ERC20 {
     }
 }
 
-/// @dev Reports failure instead of reverting, the classic non-compliant ERC20 {SafeERC20} exists for.
+/// @dev Reports failure instead of reverting, the non-compliant ERC20 case {SafeERC20} handles.
 contract FalseReturningERC20 is ERC20 {
     constructor() ERC20("Silent", "SLT") {}
 
@@ -188,7 +188,8 @@ contract ReenteringERC20 is ERC20 {
 
 // --- airlocks ---------------------------------------------------------------
 
-/// @dev Reads the launcher's state while creating, which is the window the slot reservation closes.
+/// @dev Reads the launcher's state during creation, which is the window the slot reservation
+///      covers.
 contract ObservingAirlock is IAirlock {
     RIKLauncher private _launcher;
     address private immutable _asset;
@@ -220,7 +221,7 @@ contract ObservingAirlock is IAirlock {
     function collectIntegratorFees(address, address, uint256) external pure {}
 }
 
-/// @dev Hands back an address the launcher uses as its own in-progress marker.
+/// @dev Returns the address the launcher uses as its in-progress marker.
 contract SentinelReturningAirlock is IAirlock {
     function create(CreateParams calldata)
         external

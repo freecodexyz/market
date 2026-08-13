@@ -187,7 +187,7 @@ contract RIKRoyaltySplitterSolvency_Invariant is MarketFixture {
         assertEq(launcher.marketOf(REPO_B), address(assetB));
     }
 
-    /// @dev Guards against a silently no-op handler making the invariants vacuous.
+    /// @dev Fails if the handler never reached a path, which would make the invariants trivial.
     function afterInvariant() public view {
         assertGt(handler.collects(), 0);
         assertGt(handler.claims(), 0);

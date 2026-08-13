@@ -114,7 +114,7 @@ contract RIKRoyaltySplitter_T is MarketFixture {
         splitter.collectPoolFees(pool);
     }
 
-    /// @dev Anyone may push a repository's earnings into its bucket; there is nothing to gain.
+    /// @dev Permissionless: calling it for another repository confers no benefit on the caller.
     function test_CollectPoolFeesIsPermissionless() public {
         _fundPool(3 ether, 0);
 
@@ -168,8 +168,8 @@ contract RIKRoyaltySplitter_T is MarketFixture {
         splitter.collectPoolFees(ambiguous);
     }
 
-    /// @dev A pool reporting one token twice would otherwise have a single delta counted into two
-    ///      buckets. The ambiguity check is what stops it.
+    /// @dev Without the ambiguity check, a pool reporting one token twice would have a single
+    ///      balance delta credited to two buckets.
     function test_CollectPoolFeesRejectsIdenticalTokens() public {
         pool.setTokens(address(asset), address(asset));
 
@@ -270,7 +270,7 @@ contract RIKRoyaltySplitter_T is MarketFixture {
         splitter.claim(REPO_ID, address(asset), bob);
     }
 
-    /// @dev Royalties follow the key. This is the whole reason RIK is transferable.
+    /// @dev Royalties follow the key, which is why RIK is transferable.
     function test_ClaimFollowsTheKeyAfterTransfer() public {
         _fundPool(3 ether, 0);
         splitter.collectPoolFees(pool);

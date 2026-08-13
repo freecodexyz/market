@@ -11,7 +11,7 @@ import {OidcFixture} from "./OidcFixture.sol";
 
 /**
  * @dev Metadata is asserted by decoding the data URI through `JSON.parse` in Node rather than by
- *      substring matching in Solidity, so malformed JSON fails loudly instead of passing quietly.
+ *      substring matching in Solidity, so malformed JSON fails rather than passing unnoticed.
  */
 contract RIKMetadata_T is OidcFixture {
     uint64 constant ATTESTATION_REPO_ID = 900100200;
@@ -100,8 +100,8 @@ contract RIKMetadata_T is OidcFixture {
         assertEq(vm.parseJsonString(json, ".trait_github_owner_id"), "583231");
     }
 
-    /// @dev Who claimed the repository is part of the public record, because with an org repository
-    ///      the claimant and the owner are different accounts and the difference is worth seeing.
+    /// @dev The claimant is part of the public record. For an organisation repository the claimant
+    ///      and the owner are different accounts.
     function test_MetadataCarriesTheClaimant() public {
         uint64 orgId = 9919;
         uint64 memberId = 4242;

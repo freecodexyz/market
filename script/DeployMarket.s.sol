@@ -13,10 +13,10 @@ import {RIKRoyaltySplitter} from "../src/RIKRoyaltySplitter.sol";
 /**
  * @dev Deploys the launcher and the splitter, which point at each other.
  *
- * Both wirings are immutable, so the circle is closed by predicting the second contract's address
- * before deploying the first. That is only sound while the two deployments are consecutive
- * transactions from the same account, which is why the script asserts the prediction held rather
- * than trusting it: a mismatch would otherwise ship a launcher paying fees into an empty address.
+ * Both wirings are immutable, so the second contract's address is predicted before the first is
+ * deployed. This holds only while the two deployments are consecutive transactions from the same
+ * account, so the script asserts that each prediction was correct. An unchecked mismatch would
+ * deploy a launcher that routes fees to an address with no code.
  */
 contract DeployMarket is Script {
     error AddressPredictionFailed(address predicted, address actual);
@@ -27,9 +27,9 @@ contract DeployMarket is Script {
 
         address airlock = vm.envAddress("AIRLOCK_ADDRESS");
         address registry = vm.envAddress("RIK_ADDRESS");
-        // Required rather than defaulted to the deployer. The splitter owner can sweep the Airlock's
-        // integrator fees, so which account ends up holding that is a decision to make out loud.
-        // It holds no authority over any repository's bucket.
+        // Required rather than defaulted to the deployer, so the account holding it is stated
+        // explicitly. The splitter owner can sweep the Airlock's integrator fees and holds no
+        // authority over any repository's bucket.
         address splitterOwner = vm.envAddress("SPLITTER_OWNER");
 
         uint64 nonce = vm.getNonce(deployer);

@@ -1,8 +1,8 @@
 name: Register Repository
 
 # `issues` is the only trigger that runs in THIS repository's context while setting `actor_id` to
-# the external account that acted. That is what lets somebody prove a repository they control
-# without committing anything to it, installing anything, or holding any gas.
+# the external account that acted, which allows a repository to be proven without committing
+# anything to it, installing anything, or holding gas.
 #
 # Do not add another trigger. The RIK contract pins `event_name` to `issues`, so tokens minted by
 # any other event are rejected on-chain, and `types: [opened]` keeps the title that was validated
@@ -179,9 +179,8 @@ jobs:
           args=("$kid" "$header" "$payload" "$signature" "$REPO_ID" "$OWNER_ID" "$ACTOR_ID" "$WALLET")
           signature_abi="register(bytes32,bytes,bytes,bytes,uint256,uint256,uint256,address)"
 
-          # Simulate before spending. This is what keeps an already-registered repository, an
-          # unsynced signing key or an expired token from costing the registrar anything, and it is
-          # why that key is hard to grief.
+          # Simulate before spending. This prevents an already-registered repository, an unsynced
+          # signing key or an expired token from costing the registrar anything.
           if ! error="$(cast call "$RIK_ADDRESS" "$signature_abi" "${args[@]}" \
             --from "$(cast wallet address --private-key "$REGISTRAR_PRIVATE_KEY")" \
             --rpc-url "$RPC_URL" 2>&1)"; then
@@ -228,7 +227,7 @@ jobs:
 
           - **You own it.** Works automatically for a repository owned by your own account.
           - **Install the fcf GitHub App** on the repository. It asks for \`Metadata: read\` and nothing else, and is the only option for a private repository.
-          - **Add this topic** to the repository, then open a new issue. Topics need admin permission, which is the point, and it can be removed straight afterwards:
+          - **Add this topic** to the repository, then open a new issue. Setting a topic requires admin permission, and it can be removed once registration completes:
 
           \`\`\`
           $CHALLENGE

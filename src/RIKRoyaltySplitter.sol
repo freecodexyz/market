@@ -19,27 +19,28 @@ import {IRIKRoyaltySplitter} from "./IRIKRoyaltySplitter.sol";
  *
  * @dev # Attribution
  *
- *      Every accrual has to answer "which repository earned this?", and the only trustworthy answer
- *      comes from the pool itself: one side of the pair is a market asset the launcher registered,
- *      and that asset maps back to exactly one repository. A caller never gets to name the
- *      repository being credited. The previously deployed splitter had an aggregate
- *      `pull(repoId, token)` that took the id as an argument; because the Airlock pools integrator
- *      fees per integrator rather than per market, that let anyone route every repository's fees
- *      into their own bucket. It is absent here on purpose, and must not come back.
+ *      Each accrual must determine which repository earned it. That is derived from the pool: one
+ *      side of the pair is a market asset registered by the launcher, and that asset maps to exactly
+ *      one repository. A caller cannot name the repository being credited.
+ *
+ *      The previously deployed splitter exposed `pull(repoId, token)`, which took the repository id
+ *      as an argument. Because the Airlock aggregates integrator fees per integrator rather than per
+ *      market, that allowed any caller to route every repository's fees into their own bucket. It is
+ *      deliberately absent here and must not be reintroduced.
  *
  *      # Solvency
  *
- *      Accrual is measured as the change in this contract's own balance across the collect call, so
- *      a bucket can only ever be created by tokens that actually arrived. The invariant is that the
- *      sum of every bucket in a token never exceeds this contract's balance of it, which is what
- *      makes {claim} always payable and keeps repositories from draining each other.
+ *      Accrual is measured as the change in this contract's balance across the collect call, so a
+ *      bucket can only be created by tokens that arrived. The invariant is that the sum of all
+ *      buckets in a token never exceeds this contract's balance of that token, which keeps {claim}
+ *      payable and prevents one repository being paid from another's earnings.
  *
  *      # Integrator fees
  *
- *      Fees the Airlock owes this contract as an integrator are aggregated across every market, so
- *      they cannot be attributed on-chain at all. {collectIntegratorFees} is therefore owner-gated
- *      and pays out of the Airlock straight to a recipient. It never touches this contract's
- *      balance, so it cannot reach a repository's bucket.
+ *      Fees the Airlock owes this contract as an integrator are aggregated across all markets and
+ *      cannot be attributed to a repository on-chain. {collectIntegratorFees} is therefore
+ *      owner-gated and pays from the Airlock directly to a recipient. It does not touch this
+ *      contract's balance and so cannot reach a repository's bucket.
  */
 contract RIKRoyaltySplitter is IRIKRoyaltySplitter, Ownable2Step, ReentrancyGuardTransient {
     using SafeERC20 for IERC20;
@@ -85,8 +86,8 @@ contract RIKRoyaltySplitter is IRIKRoyaltySplitter, Ownable2Step, ReentrancyGuar
      * Requirements:
      *
      * - None of `registry_`, `airlock_` or `launcher_` may be the zero address. A zero launcher
-     *   would be especially quiet: no market could ever be registered, so every pool would look
-     *   unknown and no repository would ever be paid.
+     *   fails silently: no market could be registered, so every pool would resolve as unknown and
+     *   no repository would be paid.
      * - `initialOwner` must not be the zero address, enforced by {Ownable}.
      */
     constructor(IERC721 registry_, IAirlock airlock_, address launcher_, address initialOwner) Ownable(initialOwner) {
@@ -117,8 +118,7 @@ contract RIKRoyaltySplitter is IRIKRoyaltySplitter, Ownable2Step, ReentrancyGuar
     /**
      * @dev Collects `pool`'s accrued fees and credits them to the repository that owns it.
      *
-     * Permissionless: anyone may push a repository's earnings into its bucket, and there is nothing
-     * to gain from doing so for someone else.
+     * Permissionless. Calling it for another repository confers no benefit on the caller.
      *
      * Requirements:
      *
@@ -126,9 +126,9 @@ contract RIKRoyaltySplitter is IRIKRoyaltySplitter, Ownable2Step, ReentrancyGuar
      *
      * Emits a {FeesAccrued} event per token that actually arrived.
      */
-    // Buckets are necessarily credited after the pool has been called: the amount to credit is the
-    // difference the call made. `nonReentrant` is what makes that ordering safe, and
-    // `test_CollectPoolFeesRejectsReentrancy` pins it.
+    // Buckets are necessarily credited after the pool is called, because the amount credited is the
+    // difference that call made. `nonReentrant` makes that ordering safe;
+    // `test_CollectPoolFeesRejectsReentrancy` covers it.
     // slither-disable-next-line reentrancy-benign
     function collectPoolFees(IMulticurvePool pool)
         external
@@ -145,10 +145,10 @@ contract RIKRoyaltySplitter is IRIKRoyaltySplitter, Ownable2Step, ReentrancyGuar
 
         pool.collectFees();
 
-        // Measured rather than reported: a pool that lies, or a token that takes a fee on transfer,
-        // must not be able to create a claim this contract cannot pay. The subtraction is
-        // deliberately left checked, because a pool that took tokens instead of paying them would
-        // otherwise wrap to an enormous credit and break solvency for every other repository.
+        // Measured rather than taken from the pool's return value, so that a misreporting pool or a
+        // fee-on-transfer token cannot create a claim this contract cannot pay. The subtraction is
+        // left checked: a pool that removed tokens instead of paying them would otherwise underflow
+        // to a very large credit and break solvency for every other repository.
         amount0 = IERC20(token0).balanceOf(address(this)) - before0;
         amount1 = IERC20(token1).balanceOf(address(this)) - before1;
 
@@ -174,9 +174,9 @@ contract RIKRoyaltySplitter is IRIKRoyaltySplitter, Ownable2Step, ReentrancyGuar
         returns (uint256 amount)
     {
         // Not every ERC20 reverts on a transfer to the zero address, and a bucket can only be
-        // emptied once, so an unchecked recipient is a one-shot way to burn a repository's
-        // earnings. Naming a separate recipient is otherwise deliberate: it is what lets a holder
-        // route around a token that has blacklisted their own address.
+        // emptied once, so an unchecked recipient would permanently destroy a repository's earnings.
+        // A separate recipient is otherwise intentional: it lets a holder route around a token that
+        // has blacklisted their own address.
         if (to == address(0)) revert InvalidRecipient();
 
         address caller = _msgSender();
@@ -265,8 +265,8 @@ contract RIKRoyaltySplitter is IRIKRoyaltySplitter, Ownable2Step, ReentrancyGuar
      */
     function _registerMarket(address asset, uint256 githubRepoId) internal virtual {
         if (githubRepoId == 0) revert InvalidGithubRepoId(githubRepoId);
-        // A zero asset would make every pool holding the zero address on one side look attributable
-        // to a repository, which is the sort of thing a broken Airlock could hand the launcher.
+        // A zero asset would make any pool with the zero address on one side resolve to a
+        // repository. A malfunctioning Airlock could return one to the launcher.
         if (asset == address(0)) revert InvalidAsset();
 
         uint256 existing = _repoIdOf[asset];
@@ -283,8 +283,8 @@ contract RIKRoyaltySplitter is IRIKRoyaltySplitter, Ownable2Step, ReentrancyGuar
      * Emits a {FeesAccrued} event.
      */
     function _accrue(uint256 githubRepoId, address token, uint256 amount) internal virtual {
-        // The strict comparison is against a measured balance delta, not a balance, and it only
-        // decides whether to skip a no-op write and a meaningless event.
+        // The comparison is against a measured balance delta rather than a balance, and only
+        // determines whether to skip a no-op write and its event.
         // slither-disable-next-line incorrect-equality
         if (amount == 0) return;
 
@@ -295,10 +295,10 @@ contract RIKRoyaltySplitter is IRIKRoyaltySplitter, Ownable2Step, ReentrancyGuar
     /**
      * @dev Resolves the repository a pool belongs to from its pair.
      *
-     * Exactly one side must be a registered market asset. Both sides registered is ambiguous rather
-     * than resolvable, and picking one arbitrarily would credit the wrong repository, so it reverts;
-     * that also covers a pool reporting the same token twice, which would otherwise let a single
-     * balance delta be counted into two buckets.
+     * Exactly one side must be a registered market asset. Two registered sides cannot be resolved,
+     * and selecting one would credit the wrong repository, so it reverts. This also covers a pool
+     * reporting the same token on both sides, which would otherwise credit a single balance delta
+     * to two buckets.
      */
     function _repoIdOfPair(address pool, address token0, address token1) internal view virtual returns (uint256) {
         uint256 repoId0 = _repoIdOf[token0];

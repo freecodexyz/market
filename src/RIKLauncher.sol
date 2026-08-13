@@ -13,24 +13,23 @@ import {IRIKRoyaltySplitter} from "./IRIKRoyaltySplitter.sol";
  * @title RIKLauncher
  * @notice Creates the one token market a GitHub repository is allowed, on behalf of its key holder.
  *
- * @dev This contract adds exactly three things to a direct Doppler Airlock call, and nothing else:
+ * @dev This contract adds three things to a direct Doppler Airlock call:
  *
- *      - Authorization. Only the current holder of the repository's {RIK} may launch its market.
- *      - Exclusivity. A repository gets one market, forever. The splitter's reverse mapping from an
- *        asset back to a repository is only meaningful because of that.
- *      - Fee routing. `integrator` is overwritten with the splitter address, so the market's fees
- *        land somewhere the repository's key holder can actually claim them from.
+ *      - Authorization: only the current holder of the repository's {RIK} may launch its market.
+ *      - Exclusivity: a repository gets one market. The splitter's mapping from an asset back to a
+ *        repository depends on this.
+ *      - Fee routing: `integrator` is overwritten with the splitter address so the market's fees
+ *        are collectable by the repository's key holder.
  *
- *      Everything else in {IAirlock-CreateParams} is forwarded verbatim and is the caller's problem.
- *      Validating supply, curves or migration targets here would duplicate the Airlock's own checks
- *      and grow a surface this contract does not need.
+ *      Every other field of {IAirlock-CreateParams} is forwarded unchanged. Validating supply,
+ *      curves or migration targets here would duplicate the Airlock's own checks.
  */
 contract RIKLauncher is Context, ReentrancyGuardTransient {
     /**
      * @dev Placeholder written into {marketOf} while the Airlock is creating a market.
      *
-     * Non-zero, so it satisfies the duplicate check, and not an address the Airlock can ever return
-     * as an asset: nothing is deployable at a precompile.
+     * Non-zero so that it satisfies the duplicate check, and not an address the Airlock can return
+     * as an asset, since no contract can be deployed at a precompile address.
      */
     address private constant _LAUNCHING = address(1);
 
@@ -58,8 +57,8 @@ contract RIKLauncher is Context, ReentrancyGuardTransient {
      *      authorizes against, and the splitter that will receive every market's fees.
      *
      * All three are immutable. The splitter is deployed at a precomputed address so the two
-     * contracts can point at each other without either being reconfigurable afterwards, and a zero
-     * address is rejected here because there is no way to correct one later.
+     * contracts can reference each other while remaining non-reconfigurable. A zero address is
+     * rejected here because it cannot be corrected afterwards.
      *
      * Requirements:
      *
@@ -86,9 +85,9 @@ contract RIKLauncher is Context, ReentrancyGuardTransient {
      *
      * Emits a {MarketLaunched} event.
      */
-    // The asset is only known once the Airlock has answered, so recording it necessarily happens
-    // after an external call. What that write must not be able to do is create a second market for
-    // the repository, and the reservation above closes that independently of `nonReentrant`.
+    // The asset is only known after the Airlock returns, so recording it necessarily happens after
+    // an external call. The reservation below prevents that write from creating a second market for
+    // the repository, independently of `nonReentrant`.
     // slither-disable-next-line reentrancy-no-eth
     function launch(uint256 githubRepoId, IAirlock.CreateParams calldata params)
         external
@@ -97,18 +96,16 @@ contract RIKLauncher is Context, ReentrancyGuardTransient {
         returns (address asset)
     {
         address caller = _msgSender();
-        // `ownerOf` reverts for a repository that was never registered, which is the check wanted
-        // here: no key, no market.
+        // `ownerOf` reverts for an unregistered repository, which is the required behaviour.
         if (_registry.ownerOf(githubRepoId) != caller) revert NotRepositoryKeyHolder(githubRepoId, caller);
 
         address existing = _marketOf[githubRepoId];
         if (existing != address(0)) revert MarketAlreadyLaunched(githubRepoId, existing);
 
-        // Claim the slot before handing control to the Airlock. `nonReentrant` already stops a
-        // nested launch, but one market per repository is the invariant the splitter's reverse
-        // mapping rests on, so it is worth holding independently of any single mechanism: with the
-        // slot taken, a reentrant call for this repository fails its own duplicate check. The write
-        // is only observable inside this transaction, and it is rolled back if the Airlock reverts.
+        // Reserve the slot before handing control to the Airlock. `nonReentrant` already prevents a
+        // nested launch; this makes one-market-per-repository hold independently of that guard,
+        // because a reentrant call for this repository fails its own duplicate check. The write is
+        // observable only within this transaction and is reverted if the Airlock reverts.
         _marketOf[githubRepoId] = _LAUNCHING;
 
         address pool;
@@ -153,16 +150,16 @@ contract RIKLauncher is Context, ReentrancyGuardTransient {
     /**
      * @dev Forwards `params` to the Airlock with the integrator forced to the splitter.
      *
-     * Overwriting rather than checking is deliberate. A caller-chosen integrator would send every
-     * trading fee to an address the splitter cannot collect from, which fails silently: the market
-     * works, and the repository simply never earns anything.
+     * Overwritten rather than validated. A caller-chosen integrator would route trading fees to an
+     * address the splitter cannot collect from, which fails silently: the market functions and the
+     * repository earns nothing.
      */
     function _create(IAirlock.CreateParams calldata params) internal virtual returns (address asset, address pool) {
         IAirlock.CreateParams memory forced = params;
         forced.integrator = address(_splitter);
 
-        // Governance, timelock and migration pool are the Airlock's business, not this contract's;
-        // the caller reads them from the Airlock's own events.
+        // Governance, timelock and migration pool are not used here; callers read them from the
+        // Airlock's own events.
         // slither-disable-next-line unused-return
         (asset, pool,,,) = _airlock.create(forced);
     }

@@ -69,7 +69,7 @@ contract MarketSecurity_T is MarketFixture {
     }
 
     /// @dev The quietest broken deployment of the three: no market could ever be registered, so
-    ///      every pool would look unknown and no repository would ever be paid.
+    ///      every pool would resolve as unknown and no repository would be paid.
     function test_SplitterRejectsZeroLauncher() public {
         vm.expectRevert(RIKRoyaltySplitter.InvalidWiring.selector);
         new RIKRoyaltySplitter(IERC721(address(rik)), airlock, address(0), protocolOwner);
@@ -226,9 +226,9 @@ contract MarketSecurity_T is MarketFixture {
     // --- ownership ----------------------------------------------------------
 
     /**
-     * @dev Renouncing is left available, and this pins what it costs: the sweep is gone for good,
-     *      and every repository bucket is completely unaffected. The owner never had any authority
-     *      over those, which is what makes renouncing survivable rather than catastrophic.
+     * @dev Renouncing remains available. This records its effect: the sweep is permanently
+     *      disabled and repository buckets are unaffected, because the owner never had authority
+     *      over them.
      */
     function test_RenouncingOwnershipDisablesOnlyTheSweep() public {
         _accrue(numeraire, 7 ether);
@@ -250,7 +250,7 @@ contract MarketSecurity_T is MarketFixture {
 
     // --- fuzz ---------------------------------------------------------------
 
-    /// @dev Whatever arrives is what is credited, across the whole uint96 range.
+    /// @dev The credited amount equals the amount that arrived, across the uint96 range.
     /// forge-config: default.fuzz.runs = 2048
     /// forge-config: deep.fuzz.runs = 25000
     function testFuzz_AccrualEqualsTheBalanceDelta(uint96 fees0, uint96 fees1) public {
@@ -269,7 +269,7 @@ contract MarketSecurity_T is MarketFixture {
         assertEq(splitter.claimable(REPO_ID, address(numeraire)), amount1);
     }
 
-    /// @dev A claim pays the whole bucket and leaves nothing behind, for any amount.
+    /// @dev A claim pays the entire bucket and leaves it empty, for any amount.
     /// forge-config: default.fuzz.runs = 2048
     /// forge-config: deep.fuzz.runs = 25000
     function testFuzz_ClaimPaysExactlyTheBucket(uint96 amount, address recipient) public {
