@@ -54,12 +54,15 @@ contract SystemHandler is Test {
 
     uint256 public launches;
     uint256 public collections;
+    uint256 public unknownPoolCollections;
     uint256 public payouts;
     uint256 public transfers;
     uint256 public sweeps;
 
     /// @dev Set if anyone but the current key holder ever succeeded in claiming.
     bool public strangerWasPaid;
+    /// @dev Set if a pool whose asset was never registered was accepted for collection.
+    bool public unknownPoolAccepted;
     /// @dev Set if a repository's market address ever changed after being assigned.
     bool public marketWasReassigned;
 
@@ -133,10 +136,42 @@ contract SystemHandler is Test {
         } catch {}
     }
 
-    /// @dev Mints trading fees into a pool and pushes them into whichever bucket owns it.
+    /**
+     * @dev Mints trading fees into a pool with a registered asset and collects them.
+     *
+     * The pool and the amounts are constrained so that a collection always credits something.
+     * `afterInvariant` runs after every sequence, not once per campaign, so a sequence in which
+     * every collection happened to draw an unregistered pool or a zero amount would fail its
+     * coverage assertion without indicating a defect. The unregistered path has its own action.
+     */
     function collectFees(uint256 poolSeed, uint96 fees0, uint96 fees1) external {
         collections++;
-        MockMulticurvePool pool = _pools[poolSeed % _pools.length];
+
+        // Only pool 0's asset is registered by `setUp`; the others require a launch first.
+        MockMulticurvePool pool = _pools[poolSeed % 3];
+        if (_splitter.repoIdOf(pool.token0()) == 0 && _splitter.repoIdOf(pool.token1()) == 0) {
+            pool = _pools[0];
+        }
+
+        uint256 amount0 = bound(uint256(fees0), 1, type(uint96).max);
+        uint256 amount1 = bound(uint256(fees1), 1, type(uint96).max);
+
+        address token0 = pool.token0();
+        address token1 = pool.token1();
+        MockERC20(token0).mint(address(pool), amount0);
+        MockERC20(token1).mint(address(pool), amount1);
+        pool.setFees(amount0, amount1);
+
+        try _splitter.collectPoolFees(pool) returns (uint256 collected0, uint256 collected1) {
+            accrued[token0] += collected0;
+            accrued[token1] += collected1;
+        } catch {}
+    }
+
+    /// @dev A pool whose asset was never registered. Collection must always be refused.
+    function collectFromUnknownPool(uint96 fees0, uint96 fees1) external {
+        unknownPoolCollections++;
+        MockMulticurvePool pool = _pools[3];
 
         address token0 = pool.token0();
         address token1 = pool.token1();
@@ -144,9 +179,8 @@ contract SystemHandler is Test {
         MockERC20(token1).mint(address(pool), fees1);
         pool.setFees(fees0, fees1);
 
-        try _splitter.collectPoolFees(pool) returns (uint256 amount0, uint256 amount1) {
-            accrued[token0] += amount0;
-            accrued[token1] += amount1;
+        try _splitter.collectPoolFees(pool) {
+            unknownPoolAccepted = true;
         } catch {}
     }
 
@@ -337,6 +371,11 @@ contract MarketSystem_Invariant is MarketFixture {
         assertFalse(handler.strangerWasPaid());
     }
 
+    /// @dev A pool whose asset was never registered cannot be attributed to any repository.
+    function invariant_UnknownPoolsAreNeverAccepted() public view {
+        assertFalse(handler.unknownPoolAccepted());
+    }
+
     /// @dev Fails if the handler never reached a path, which would make the invariants trivial.
     function afterInvariant() public view {
         assertGt(handler.launches(), 0);
@@ -345,8 +384,9 @@ contract MarketSystem_Invariant is MarketFixture {
         assertGt(handler.transfers(), 0);
         assertGt(handler.sweeps(), 0);
 
-        // At least one repository must actually have earned something, or the accounting
-        // invariants are all comparing zero to zero.
+        // At least one repository must have earned something, or the accounting invariants are
+        // comparing zero to zero. `collectFees` credits a non-zero amount on every call, so this
+        // follows from it having been called at all rather than from what the fuzzer chose.
         uint256 everAccrued;
         for (uint256 t = 0; t < tokens.length; ++t) {
             everAccrued += handler.accrued(tokens[t]);
