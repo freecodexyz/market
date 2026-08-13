@@ -44,6 +44,16 @@ require() {
   [ "$1" = "$2" ] || fail "expected $3 to be $2, got $1"
 }
 
+# Runs a command that must fail, and must mention `pattern` when it does.
+refuses() {
+  local pattern="$1"; shift
+  local out
+  if out="$("$@" 2>&1)"; then
+    fail "expected '$*' to be refused, but it succeeded"
+  fi
+  printf '%s' "$out" | grep -q "$pattern" || fail "expected refusal to mention '$pattern', got: $out"
+}
+
 chain_id=$(cast chain-id --rpc-url "$RPC_URL" 2>/dev/null) || fail "no node at $RPC_URL; start anvil first"
 [ "$chain_id" = "31337" ] || fail "refusing to run against chain $chain_id; this is for a local anvil only"
 
@@ -63,9 +73,24 @@ AIRLOCK=$(forge create --rpc-url "$RPC_URL" --private-key "$PRIVATE_KEY" --broad
   --constructor-args "$ASSET" "0x000000000000000000000000000000000000bEEF" \
   | ruby -rjson -e 'puts JSON.parse(STDIN.read)["deployedTo"]')
 
-echo "==> market deploy"
+# The chain guard is what separates a testnet run from a mainnet one, so verify that it refuses
+# rather than assuming it does.
+echo "==> a deploy aimed at the wrong chain is refused"
+refuses "Base (8453) was expected" ./bin/market deploy --rpc-url "$RPC_URL" --verifier "$VERIFIER" \
+  --airlock "$AIRLOCK" --rik-owner "$WALLET" --splitter-owner "$WALLET" --chain-id 8453 \
+  --attestation-repo-id "$ATTESTATION_REPO_ID" --job-workflow-ref "$JOB_WORKFLOW_REF"
+
+echo "==> so is one pinned through the environment"
+( export MARKET_CHAIN_ID=84532
+  refuses "Base Sepolia (84532) was expected" ./bin/market deploy --rpc-url "$RPC_URL" \
+    --verifier "$VERIFIER" --airlock "$AIRLOCK" --rik-owner "$WALLET" --splitter-owner "$WALLET" \
+    --attestation-repo-id "$ATTESTATION_REPO_ID" --job-workflow-ref "$JOB_WORKFLOW_REF" )
+
+[ -f .market.yml ] && fail "a refused deploy must not have recorded anything"
+
+echo "==> market deploy, with the chain pinned to the one actually there"
 ./bin/market deploy --rpc-url "$RPC_URL" --verifier "$VERIFIER" --airlock "$AIRLOCK" \
-  --rik-owner "$WALLET" --splitter-owner "$WALLET" \
+  --rik-owner "$WALLET" --splitter-owner "$WALLET" --chain-id "$chain_id" \
   --attestation-repo-id "$ATTESTATION_REPO_ID" --job-workflow-ref "$JOB_WORKFLOW_REF"
 
 RIK=$(ruby -ryaml -e 'puts YAML.safe_load_file(".market.yml")["rik"]')
@@ -144,6 +169,23 @@ require "$(cast --to-checksum-address "$seen")" "$(cast --to-checksum-address "$
 
 echo "==> market royalty show"
 ./bin/market royalty show "$REPO_ID" "$ASSET"
+
+echo "==> the recorded chain guards anything that spends gas"
+( export MARKET_CHAIN_ID=8453
+  refuses "Base (8453) was expected" ./bin/market royalty collect "$ASSET"
+  # Reads are not gated: inspecting a deployment is harmless whatever chain you meant.
+  ./bin/market royalty show "$REPO_ID" "$ASSET" >/dev/null || fail "a read should not be chain-gated" )
+
+# Captured rather than piped throughout: `grep -q` closes the pipe on its first match, and under
+# `pipefail` the resulting SIGPIPE looks like a failing command.
+echo "==> MARKET_RPC_URL overrides the recorded endpoint"
+( export MARKET_RPC_URL="http://127.0.0.1:1"
+  offline="$(./bin/market status 2>&1 || true)"
+  printf '%s' "$offline" | grep -q "unreachable" || fail "MARKET_RPC_URL was ignored" )
+
+echo "==> the network is named, not just numbered"
+shown="$(./bin/market status 2>&1)" || fail "status should work without the override"
+printf '%s' "$shown" | grep -q "Anvil (31337)" || fail "status should name the chain"
 
 echo "==> bad arguments are refused"
 ! ./bin/market rik show not-a-number 2>/dev/null || fail "accepted a non-numeric repository id"

@@ -17,23 +17,55 @@ module Market
       "FCF_RIK_FROM_BLOCK" => :deployed_at
     }.freeze
 
-    # Pays gas for registrations and nothing else. `register` names its own beneficiary through the
-    # `aud` claim, so this key holds no authority over the registry.
+    # Pays gas for registrations only. `register` names its beneficiary through the `aud` claim, so
+    # this key holds no authority over the registry.
     REGISTRAR_SECRET = "FCF_REGISTRAR_PRIVATE_KEY"
 
-    # Optional. Lets the attestation workflow ask GitHub whether an issue opener holds `admin` on
-    # the repository being claimed, which is how organisation repositories are proven without the
-    # organisation touching them. The app needs `Metadata: read` and nothing else.
+    # Optional. Allows the attestation workflow to ask GitHub whether an issue opener holds `admin`
+    # on the repository being claimed, which is how organisation repositories are proven without a
+    # change to the repository. The app requires `Metadata: read` only.
     APP_ID_VARIABLE = "FCF_APP_ID"
     APP_KEY_SECRET = "FCF_APP_PRIVATE_KEY"
 
-    def initialize(root: Dir.pwd)
+    def initialize(root: Dir.pwd, chain_id: nil)
       @root = root
       @config = Config.load(root)
       @github = GitHub.new(root: root)
+      @chain_id_override = chain_id
+
+      # An endpoint from the environment takes precedence over the recorded one, so a testnet run
+      # does not require editing the file that records a live deployment.
+      env_rpc = ENV.fetch("MARKET_RPC_URL", nil)
+      @config.rpc_url = env_rpc unless env_rpc.to_s.empty?
     end
 
     attr_reader :config
+
+    # The chain the operator intends to act on: the flag, then the environment, then the chain the
+    # last deployment recorded. Nil when none is set.
+    #
+    # This is a guard rather than a setting. A chain id is a property of the endpoint and cannot be
+    # chosen; declaring it turns acting on the wrong network into an error.
+    def expected_chain_id(include_recorded: true)
+      raw = @chain_id_override || ENV.fetch("MARKET_CHAIN_ID", nil)
+      raw = config.chain_id if raw.to_s.empty? && include_recorded
+      return nil if raw.to_s.empty?
+
+      Integer(raw)
+    rescue ArgumentError, TypeError
+      raise InvalidState, "not a chain id: #{raw.inspect}"
+    end
+
+    # Reads the live chain id, and refuses to go on if it is not the one that was asked for.
+    def require_expected_chain!(include_recorded: true)
+      actual = chain.chain_id
+      expected = expected_chain_id(include_recorded: include_recorded)
+      return actual if expected.nil? || expected == actual
+
+      raise InvalidState,
+            "#{config.rpc_url} is #{Chain.describe(actual)}, but #{Chain.describe(expected)} was expected. " \
+            "Pass --chain-id #{actual} or set MARKET_CHAIN_ID=#{actual} to act on this one."
+    end
 
     # --- commands -----------------------------------------------------------
 
@@ -56,7 +88,9 @@ module Market
       if config.rpc_url.to_s.empty?
         UI.warn "no RPC configured; pass --rpc-url to deploy"
       elsif chain.reachable?
-        UI.ok "#{config.rpc_url} (chain #{chain.chain_id})"
+        UI.ok "#{config.rpc_url} (#{Chain.describe(chain.chain_id)})"
+        expected = expected_chain_id
+        UI.error "expected #{Chain.describe(expected)}" if expected && expected != chain.chain_id
       else
         UI.error "#{config.rpc_url} is unreachable"
       end
@@ -88,15 +122,21 @@ module Market
       raise MissingRequirement, "no Airlock; pass --airlock" if config.airlock.to_s.empty?
       raise InvalidState, "#{config.rpc_url} is unreachable" unless chain.reachable?
 
+      # A chain named on the command line or in the environment is required to match. A chain id
+      # left over from a previous deployment produces a warning instead, because deploying to a
+      # different network is a normal next step and the plan below is confirmed before broadcasting.
+      actual_chain = require_expected_chain!(include_recorded: false)
+      recorded_chain = config.chain_id
+
       deployer = chain.address_of(private_key)
       # Defaulted here rather than in the script, so whoever ends up holding each authority is
       # printed in the plan and recorded in the config instead of being implied by a key.
       config.splitter_owner = splitter_owner || config.splitter_owner || deployer
       config.rik_owner = rik_owner || config.rik_owner || deployer
 
-      # Derived from the checkout rather than typed, because a hand-assembled workflow ref is the
-      # easiest way to deploy a registry that rejects every proof. The override exists for a local
-      # chain and for a checkout with no GitHub remote, and says so out loud.
+      # Derived from the checkout rather than entered by hand: an incorrect workflow ref produces a
+      # registry that rejects every proof. The override exists for a local chain and for a checkout
+      # with no GitHub remote, and is reported in the plan.
       if attestation_repo_id && job_workflow_ref
         config.attestation_repo_id = Integer(attestation_repo_id)
         config.job_workflow_ref = job_workflow_ref
@@ -110,7 +150,7 @@ module Market
       end
 
       UI.heading "Plan"
-      UI.field "chain", chain.chain_id
+      UI.field "chain", Chain.describe(actual_chain)
       UI.field "deployer", deployer
       UI.field "balance", "#{chain.balance_eth(deployer)} ETH"
       UI.field "verifier", config.verifier
@@ -122,6 +162,11 @@ module Market
       UI.note "the rik owner can repoint the attestation source, and so can mint any repository's key"
       UI.field "splitter owner", config.splitter_owner
       UI.note "the splitter owner can sweep integrator fees; it cannot touch a repository's bucket"
+
+      if recorded_chain && Integer(recorded_chain) != actual_chain
+        UI.warn "#{Config::FILENAME} records a deployment on #{Chain.describe(recorded_chain)}"
+        UI.note "continuing overwrites it with this one; the old addresses are only in git history"
+      end
 
       raise InvalidState, "deployer has no balance" if chain.balance(deployer).zero?
       raise InvalidState, "verifier #{config.verifier} has no code" unless chain.contract?(config.verifier)
@@ -179,7 +224,7 @@ module Market
       require_registry!
 
       UI.heading "Recorded"
-      UI.field "chain", config.chain_id
+      UI.field "chain", Chain.describe(config.chain_id)
       UI.field "rpc", config.rpc_url
       UI.field "verifier", config.verifier
       UI.field "airlock", config.airlock
@@ -192,6 +237,10 @@ module Market
         UI.error "#{config.rpc_url} is unreachable"
         return
       end
+
+      # Reading a deployment through an endpoint for a different chain is indistinguishable from a
+      # broken deployment, so the two are reported separately.
+      compare "live chain", Chain.describe(chain.chain_id), Chain.describe(config.chain_id)
 
       UI.heading "Registry"
       UI.field "name", chain.call_string(config.rik, "name()(string)")
@@ -289,7 +338,7 @@ module Market
       raise InvalidState, "market contracts not deployed yet; run market deploy"
     end
 
-    # Read once, never written to disk, never echoed.
+    # Read once. Never written to disk and never echoed.
     def private_key
       @private_key ||= begin
         raw = ENV["MARKET_PRIVATE_KEY"] || ENV["PRIVATE_KEY"] || UI.read_secret("Deployer private key")
@@ -320,9 +369,9 @@ module Market
       end
     end
 
-    # The registry only accepts proofs from one workflow file in one repository. Both are read back
-    # from the chain and compared against this checkout, because a mismatch is silent: every
-    # registration simply fails, with nothing on-chain to explain why.
+    # The registry accepts proofs from one workflow file in one repository. Both are read from the
+    # chain and compared against this checkout, because a mismatch fails silently: registrations
+    # fail with nothing on-chain to indicate why.
     def report_attestation_source
       on_chain_repo = chain.call_integer(config.rik, "attestationRepoId()(uint64)")
       on_chain_ref = chain.call_string(config.rik, "jobWorkflowRef()(string)")

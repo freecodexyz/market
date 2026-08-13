@@ -11,7 +11,7 @@ whole thing can change hands as one asset.
 
 | Contract | What it is |
 | --- | --- |
-| [`src/RIK.sol`](src/RIK.sol) | Repository Identity Key. Verifies a GitHub Actions OIDC proof and mints one key per repository, forever. On-chain metadata, no owner, no admin function. |
+| [`src/RIK.sol`](src/RIK.sol) | Repository Identity Key. Verifies a GitHub Actions OIDC proof and mints one key per repository, forever. On-chain metadata. Its owner pins the attestation source and nothing else, which still makes it the most powerful role here. |
 | [`src/RIKLauncher.sol`](src/RIKLauncher.sol) | Creates the one market a repository is allowed, on behalf of its key holder, through the Doppler Airlock. |
 | [`src/RIKRoyaltySplitter.sol`](src/RIKRoyaltySplitter.sol) | Accrues that market's fees and pays them to whoever currently holds the key. |
 
@@ -28,9 +28,9 @@ Open an issue here, titled with the repository and the wallet that should hold i
 octocat/Hello-World 0x1111111111111111111111111111111111111111
 ```
 
-That is the whole flow. You commit nothing to your own repository, install nothing, and need no ETH:
-a workflow here checks that you control the repository, requests a signed proof from GitHub, and a
-relayer pays for the transaction. The result is posted back as a comment.
+No commit to your own repository, no installation, and no ETH: a workflow here verifies that you
+control the repository, requests a signed proof from GitHub, and a relayer submits the transaction.
+The result is posted back as a comment on the issue.
 
 ## Proof model
 
@@ -66,11 +66,10 @@ pay the gas without being able to redirect the key.
 | Static analysis | `slither .`, at zero findings |
 | Operator path | `./smoke-test.sh` against a local anvil |
 
-The invariant campaigns are the part worth knowing about. The splitter is a conduit, so the property
-that matters is that what it still owes plus what it has already paid equals what it was ever
-credited — exactly, through any interleaving of collections, transfers, payouts and owner sweeps.
-[SECURITY.md](SECURITY.md) records the threat model, what is assumed honest, and why each accepted
-static-analysis finding is accepted.
+The splitter is a conduit, so its central invariant is that outstanding buckets plus amounts already
+paid equal the total ever credited, under any interleaving of collections, transfers, payouts and
+owner sweeps. [SECURITY.md](SECURITY.md) records the threat model, what is assumed honest, and the
+rationale for each accepted static-analysis finding.
 
 ## Commands
 
@@ -111,12 +110,42 @@ The CLI is Ruby 3.2, standard library only, no bundler:
 The signing key is read from `MARKET_PRIVATE_KEY` or `PRIVATE_KEY`, or prompted for without echo. It
 is never written to `.market.yml`.
 
+## Choosing a network
+
+`MARKET_RPC_URL` and `MARKET_CHAIN_ID` override the recorded endpoint and pin the chain, so
+rehearsing on a testnet is a variable rather than an edit to the file that also records a live
+deployment. `--rpc-url` and `--chain-id` do the same per command.
+
+The chain id is a guard rather than a setting: an endpoint's chain cannot be chosen. Declaring it
+makes acting on the wrong network an error. A deploy aimed at a chain that is not present is refused
+before anything is broadcast, as is any command that spends gas. Reads are not gated.
+
+```shell
+export MARKET_RPC_URL=https://sepolia.base.org
+export MARKET_CHAIN_ID=84532
+
+./bin/market doctor          # names the network: "Base Sepolia (84532)"
+./bin/market deploy --verifier … --airlock … --rik-owner … --splitter-owner …
+```
+
+**Base Sepolia needs its own verifier.** `market` never deploys one, and the `identity` instance it
+normally points at is on Base Mainnet, so a testnet rehearsal has to stand one up first and mirror
+GitHub's signing keys into it:
+
+```shell
+forge create --rpc-url "$MARKET_RPC_URL" --private-key "$PRIVATE_KEY" --broadcast \
+  src/GithubOidcVerifier.sol:GithubOidcVerifier --constructor-args <owner>
+# then sync GitHub's JWKS into it — see the identity repository's sync-github-keys.sh
+```
+
+`market deploy` rejects a verifier address with no code, so omitting this step fails immediately
+rather than producing a registry that rejects every proof.
+
 ## Notes for contributors
 
-Read [AGENTS.md](AGENTS.md) before changing anything. It records the decisions that are load-bearing
-rather than incidental — why the event pin exists, why the key is transferable but registers only
-once, why the splitter never takes a repository id from its caller, and which files are vendored and
-must not be edited here.
+Read [AGENTS.md](AGENTS.md) before making changes. It records the decisions that are load-bearing:
+why the event pin exists, why the key is transferable but registers only once, why the splitter never
+accepts a repository id from its caller, and which files are vendored and must not be edited here.
 
 ## Licence
 

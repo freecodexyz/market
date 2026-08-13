@@ -27,6 +27,7 @@ module Market
 
       Options:
         --rpc-url URL              RPC endpoint (deploy; remembered afterwards)
+        --chain-id ID              the chain you mean; refuses to act on any other
         --verifier ADDRESS         deployed GithubOidcVerifier to trust (deploy)
         --airlock ADDRESS          Doppler Airlock to launch markets through (deploy)
         --rik-owner ADDRESS        account that controls the attestation source (deploy)
@@ -43,6 +44,13 @@ module Market
 
       The signing key is read from MARKET_PRIVATE_KEY or PRIVATE_KEY, or prompted for.
       It is never written to #{Config::FILENAME}.
+
+      MARKET_RPC_URL and MARKET_CHAIN_ID override the recorded endpoint and pin the chain, so
+      a Base Sepolia rehearsal is a variable rather than an edit:
+
+        MARKET_RPC_URL=https://sepolia.base.org MARKET_CHAIN_ID=84532 ./bin/market status
+
+      Anything that spends gas refuses to run against a chain other than the pinned one.
 
       This project does not deploy a verifier. Point --verifier at the one the identity
       repository already runs; its signing keys are mirrored there.
@@ -86,6 +94,7 @@ module Market
     def parser
       OptionParser.new do |o|
         o.on("--rpc-url URL") { |value| options[:rpc_url] = value }
+        o.on("--chain-id ID") { |value| options[:chain_id] = value }
         o.on("--verifier ADDRESS") { |value| options[:verifier] = value }
         o.on("--airlock ADDRESS") { |value| options[:airlock] = value }
         o.on("--rik-owner ADDRESS") { |value| options[:rik_owner] = value }
@@ -158,7 +167,7 @@ module Market
     end
 
     def deployment
-      @deployment ||= Deployment.new(root: root)
+      @deployment ||= Deployment.new(root: root, chain_id: options[:chain_id])
     end
 
     def registry
@@ -166,7 +175,7 @@ module Market
     end
 
     # Accepts a decimal repository id. GitHub ids are numeric and are what the contracts pin, so
-    # anything else is a mistake worth catching before it reaches an RPC call.
+    # anything else is rejected before it reaches an RPC call.
     def repo_id!
       raw = argv.shift
       raise Error, "expected a repository id" if raw.to_s.empty?

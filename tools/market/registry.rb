@@ -5,8 +5,8 @@ require "json"
 module Market
   # Reading and operating a live deployment: repository keys, their markets, and their royalties.
   #
-  # Everything here goes through the deployment's recorded addresses, so a command never needs an
-  # address typed at it beyond the thing being asked about.
+  # Everything here uses the deployment's recorded addresses, so a command takes no address beyond
+  # the subject being queried.
   class Registry
     DATA_URI_PREFIX = "data:application/json;base64,"
 
@@ -46,8 +46,7 @@ module Market
       UI.field "holder", chain.call(rik, "ownerOf(uint256)(address)", repo_id)
       UI.field "repository id", record[0]
       UI.field "owner id", record[1]
-      # With an organisation repository the claimant and the owner are different accounts, and the
-      # difference is the interesting part of the record.
+      # For an organisation repository the claimant and the owner are different accounts.
       UI.field "claimed by", record[2]
       UI.field "registered at", timestamp(record[3])
 
@@ -95,10 +94,12 @@ module Market
       amount
     end
 
-    # Pushes a pool's accrued fees into the owning repository's bucket. Permissionless, so this is
-    # safe to run for someone else's repository and is how a keeper would drive it.
+    # Pushes a pool's accrued fees into the owning repository's bucket. Permissionless, so it is
+    # safe to run for another repository; this is the entry point a keeper would use.
     def collect(pool)
       deployment.require_deployment!
+      # Refuse to spend gas on a chain other than the one configured.
+      deployment.require_expected_chain!
 
       UI.step "collecting fees from #{pool}"
       output = chain.send_transaction(
@@ -112,6 +113,7 @@ module Market
     # Withdraws a bucket. The signing key must currently hold the repository's key.
     def claim(repo_id, token, to)
       deployment.require_deployment!
+      deployment.require_expected_chain!
       config = deployment.config
 
       amount = chain.call_integer(config.splitter, "claimable(uint256,address)(uint256)", repo_id, token)
@@ -160,8 +162,8 @@ module Market
       value
     end
 
-    # Metadata is served on chain as a base64 data URI, so it can be shown without a network hop to
-    # anything but the RPC endpoint.
+    # Metadata is served on chain as a base64 data URI, so displaying it requires no request beyond
+    # the RPC endpoint.
     def metadata(rik, repo_id)
       uri = chain.call_string(rik, "tokenURI(uint256)(string)", repo_id)
       return UI.warn "token URI is not an on-chain data URI" unless uri.start_with?(DATA_URI_PREFIX)

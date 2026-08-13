@@ -5,6 +5,23 @@ module Market
   class Chain
     WEI_PER_ETHER = 10**18
 
+    # Used only to label output. An id that is not listed is reported as-is rather than rejected.
+    NETWORKS = {
+      1 => "Ethereum",
+      8453 => "Base",
+      84532 => "Base Sepolia",
+      11_155_111 => "Sepolia",
+      31_337 => "Anvil"
+    }.freeze
+
+    # Renders "Base Sepolia (84532)" rather than "84532".
+    def self.describe(id)
+      return "unknown" if id.nil?
+
+      name = NETWORKS[id.to_i]
+      name ? "#{name} (#{id})" : id.to_s
+    end
+
     # A contract created by a broadcast run.
     Deployed = Data.define(:name, :address, :block)
 
@@ -53,7 +70,7 @@ module Market
     end
 
     # Reads a numeric return. cast annotates large values as `1260258423 [1.26e9]`, so only the
-    # leading token is the number.
+    # leading token is the value.
     def call_integer(address, signature, *args)
       Integer(call(address, signature, *args).split.first)
     end
@@ -71,8 +88,8 @@ module Market
       raw[1..-2].split(",").map { |member| member.strip.split.first }
     end
 
-    # Reads a value without reverting the process when the call itself reverts, which is how the
-    # registry answers "no such repository".
+    # Reads a value, returning nil when the call reverts. The registry reverts for an unregistered
+    # repository.
     def try_call(address, signature, *args)
       call(address, signature, *args)
     rescue CommandFailed
@@ -83,11 +100,11 @@ module Market
       cast("send", address, signature, *args, "--private-key", private_key)
     end
 
-    # Runs a Foundry deploy script and returns what it created.
+    # Runs a Foundry deploy script and returns the contracts it created.
     #
-    # The script itself stays the single source of truth for how a deployment is wired; this only
-    # supplies the environment it expects and reads the addresses back out of the broadcast
-    # artifact, which also carries the block each contract landed in.
+    # The script remains the single definition of how a deployment is wired. This supplies the
+    # environment it expects and reads the addresses back from the broadcast artifact, which also
+    # records the block each contract was included in.
     def run_script(script, env:, private_key:)
       Shell.stream(
         "forge", "script", File.join("script", script),
