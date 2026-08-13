@@ -8,10 +8,11 @@ import {RIK} from "../src/RIK.sol";
 import {RIKLauncher} from "../src/RIKLauncher.sol";
 import {RIKRoyaltySplitter} from "../src/RIKRoyaltySplitter.sol";
 import {IAirlock} from "../src/IAirlock.sol";
+import {PoolKey} from "../src/IDopplerHookInitializer.sol";
 import {MarketFixture} from "./MarketFixture.sol";
 import {MockAirlock} from "./mocks/MockAirlock.sol";
 import {MockERC20} from "./mocks/MockERC20.sol";
-import {MockMulticurvePool} from "./mocks/MockMulticurvePool.sol";
+import {MockDopplerHookInitializer} from "./mocks/MockDopplerHookInitializer.sol";
 
 /// @dev The deployed system, grouped so the handler's constructor stays inside the stack limit.
 struct SystemWiring {
@@ -42,7 +43,8 @@ contract SystemHandler is Test {
 
     uint256[] private _repos;
     MockERC20[] private _assets;
-    MockMulticurvePool[] private _pools;
+    MockDopplerHookInitializer private _initializer;
+    MockERC20 private _foreignAsset;
     address[] private _actors;
 
     /// @dev Every token ever credited into a repository bucket.
@@ -70,7 +72,8 @@ contract SystemHandler is Test {
         SystemWiring memory wiring,
         uint256[] memory repos_,
         MockERC20[] memory assets_,
-        MockMulticurvePool[] memory pools_,
+        MockDopplerHookInitializer initializer_,
+        MockERC20 foreignAsset_,
         address[] memory actors_
     ) {
         _rik = wiring.rik;
@@ -81,7 +84,8 @@ contract SystemHandler is Test {
         _owner = wiring.owner;
         _repos = repos_;
         _assets = assets_;
-        _pools = pools_;
+        _initializer = initializer_;
+        _foreignAsset = foreignAsset_;
         _actors = actors_;
     }
 
@@ -144,44 +148,41 @@ contract SystemHandler is Test {
      * every collection happened to draw an unregistered pool or a zero amount would fail its
      * coverage assertion without indicating a defect. The unregistered path has its own action.
      */
-    function collectFees(uint256 poolSeed, uint96 fees0, uint96 fees1) external {
+    function collectFees(uint256 assetSeed, uint96 fees0, uint96 fees1) external {
         collections++;
 
-        // Only pool 0's asset is registered by `setUp`; the others require a launch first.
-        MockMulticurvePool pool = _pools[poolSeed % 3];
-        if (_splitter.repoIdOf(pool.token0()) == 0 && _splitter.repoIdOf(pool.token1()) == 0) {
-            pool = _pools[0];
-        }
+        // Only the first asset is launched by `setUp`; the others require a launch first.
+        uint256 index = assetSeed % _assets.length;
+        address asset = address(_assets[index]);
+        if (_splitter.repoIdOf(asset) == 0) asset = address(_assets[0]);
 
         uint256 amount0 = bound(uint256(fees0), 1, type(uint96).max);
         uint256 amount1 = bound(uint256(fees1), 1, type(uint96).max);
 
-        address token0 = pool.token0();
-        address token1 = pool.token1();
-        MockERC20(token0).mint(address(pool), amount0);
-        MockERC20(token1).mint(address(pool), amount1);
-        pool.setFees(amount0, amount1);
+        (address token0, address token1) = _currenciesOf(asset);
+        // Doppler holds a pool's fees in the initializer until a beneficiary collects them.
+        MockERC20(token0).mint(address(_initializer), amount0);
+        MockERC20(token1).mint(address(_initializer), amount1);
+        _initializer.accrue(asset, amount0, amount1);
 
-        try _splitter.collectPoolFees(pool) returns (uint256 collected0, uint256 collected1) {
+        try _splitter.collectPoolFees(asset) returns (uint256 collected0, uint256 collected1) {
             accrued[token0] += collected0;
             accrued[token1] += collected1;
         } catch {}
     }
 
-    /// @dev A pool whose asset was never registered. Collection must always be refused.
-    function collectFromUnknownPool(uint96 fees0, uint96 fees1) external {
+    /// @dev An asset the launcher never registered. Collection must always be refused.
+    function collectFromUnknownPool(uint96, uint96) external {
         unknownPoolCollections++;
-        MockMulticurvePool pool = _pools[3];
 
-        address token0 = pool.token0();
-        address token1 = pool.token1();
-        MockERC20(token0).mint(address(pool), fees0);
-        MockERC20(token1).mint(address(pool), fees1);
-        pool.setFees(fees0, fees1);
-
-        try _splitter.collectPoolFees(pool) {
+        try _splitter.collectPoolFees(address(_foreignAsset)) {
             unknownPoolAccepted = true;
         } catch {}
+    }
+
+    function _currenciesOf(address asset) private view returns (address, address) {
+        (,,,,, PoolKey memory poolKey,) = _initializer.getState(asset);
+        return (poolKey.currency0, poolKey.currency1);
     }
 
     /// @dev Claims as whoever currently holds the key, which is the only caller that can succeed.
@@ -253,6 +254,9 @@ contract SystemHandler is Test {
         p.initialSupply = 1_000_000 ether;
         p.numTokensToSell = 500_000 ether;
         p.numeraire = address(_numeraire);
+        // Without an initializer the launcher cannot verify the splitter is a beneficiary, so every
+        // launch would be refused and the campaign would never reach a second market.
+        p.poolInitializer = address(_initializer);
         p.integrator = address(0xDEFEA7);
         p.salt = bytes32(uint256(1));
     }
@@ -287,14 +291,12 @@ contract MarketSystem_Invariant is MarketFixture {
         assets.push(new MockERC20("Repository Token B", "REPOB"));
         assets.push(new MockERC20("Repository Token C", "REPOC"));
 
-        MockMulticurvePool[] memory pools = new MockMulticurvePool[](4);
         for (uint256 i = 0; i < 3; ++i) {
-            pools[i] = new MockMulticurvePool(address(assets[i]), address(numeraire));
             tokens.push(address(assets[i]));
         }
         tokens.push(address(numeraire));
-        // A pool whose asset is never registered, so the unknown-pool path stays exercised.
-        pools[3] = new MockMulticurvePool(address(new MockERC20("Foreign", "FGN")), address(numeraire));
+        // An asset the launcher never registered, so the unknown-market path stays exercised.
+        MockERC20 foreign = new MockERC20("Foreign", "FGN");
 
         actors.push(alice);
         actors.push(bob);
@@ -313,7 +315,7 @@ contract MarketSystem_Invariant is MarketFixture {
             owner: protocolOwner
         });
 
-        handler = new SystemHandler(wiring, repos, assets, pools, actors);
+        handler = new SystemHandler(wiring, repos, assets, initializer, foreign, actors);
 
         targetContract(address(handler));
     }

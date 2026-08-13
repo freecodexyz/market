@@ -10,6 +10,7 @@ import {IJwtVerifier} from "../../src/IJwtVerifier.sol";
 import {RIK} from "../../src/RIK.sol";
 import {RIKLauncher} from "../../src/RIKLauncher.sol";
 import {RIKRoyaltySplitter} from "../../src/RIKRoyaltySplitter.sol";
+import {MockDopplerHookInitializer} from "./MockDopplerHookInitializer.sol";
 
 // --- ERC-721 receivers ------------------------------------------------------
 
@@ -206,11 +207,18 @@ contract ObservingAirlock is IAirlock {
         _launcher = launcher_;
     }
 
-    function create(CreateParams calldata)
+    /// @dev Records the launcher's view of the slot, then completes the launch the way the real
+    ///      Airlock does, so the observation survives rather than being rolled back by a revert.
+    function create(CreateParams calldata params)
         external
         returns (address asset, address pool, address governance, address timelock, address migrationPool)
     {
         observedMarket = _launcher.marketOf(_repoId);
+
+        MockDopplerHookInitializer initializer = MockDopplerHookInitializer(params.poolInitializer);
+        initializer.createPool(_asset, params.numeraire, 3000, 60);
+        initializer.setShares(_asset, params.integrator, 1e18);
+
         return (_asset, address(0xB001), address(0), address(0), address(0));
     }
 

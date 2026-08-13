@@ -6,11 +6,13 @@ import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 
 import {GithubOidcVerifier} from "../src/GithubOidcVerifier.sol";
 import {IAirlock} from "../src/IAirlock.sol";
+import {PoolKey} from "../src/IDopplerHookInitializer.sol";
 import {IRIKRoyaltySplitter} from "../src/IRIKRoyaltySplitter.sol";
 import {RIK} from "../src/RIK.sol";
 import {RIKLauncher} from "../src/RIKLauncher.sol";
 import {RIKRoyaltySplitter} from "../src/RIKRoyaltySplitter.sol";
 import {MockAirlock} from "./mocks/MockAirlock.sol";
+import {MockDopplerHookInitializer} from "./mocks/MockDopplerHookInitializer.sol";
 import {MockERC20} from "./mocks/MockERC20.sol";
 import {OidcFixture} from "./OidcFixture.sol";
 
@@ -33,6 +35,7 @@ abstract contract MarketFixture is OidcFixture {
     GithubOidcVerifier verifier;
     RIK rik;
     MockAirlock airlock;
+    MockDopplerHookInitializer initializer;
     RIKLauncher launcher;
     RIKRoyaltySplitter splitter;
 
@@ -57,6 +60,7 @@ abstract contract MarketFixture is OidcFixture {
         asset = new MockERC20("Repository Token", "REPO");
         numeraire = new MockERC20("Wrapped Ether", "WETH");
         airlock = new MockAirlock(address(asset), POOL_ADDRESS);
+        initializer = new MockDopplerHookInitializer();
 
         uint64 nonce = vm.getNonce(address(this));
         address launcherAddress = vm.computeCreateAddress(address(this), nonce);
@@ -79,6 +83,20 @@ abstract contract MarketFixture is OidcFixture {
         rik.register(f.kid, f.headerB64, f.payloadB64, f.signature, repoId, ownerId, ownerId, wallet);
     }
 
+    /// @dev Funds the initializer and credits `asset`'s pool with fees it has earned.
+    function _earn(address asset_, uint256 amount0, uint256 amount1) internal {
+        (address currency0, address currency1) = _currenciesOf(asset_);
+        if (amount0 != 0) MockERC20(currency0).mint(address(initializer), amount0);
+        if (amount1 != 0) MockERC20(currency1).mint(address(initializer), amount1);
+        initializer.accrue(asset_, amount0, amount1);
+    }
+
+    /// @dev The sorted pair for `asset_`, which is the order the splitter credits them in.
+    function _currenciesOf(address asset_) internal view returns (address currency0, address currency1) {
+        (,,,,, PoolKey memory poolKey,) = initializer.getState(asset_);
+        return (poolKey.currency0, poolKey.currency1);
+    }
+
     /// @dev Registers `REPO_ID` to `alice` and launches its market.
     function _launchedMarket() internal returns (address launched) {
         _registerRepo(REPO_ID, OWNER_ID, alice);
@@ -88,15 +106,24 @@ abstract contract MarketFixture is OidcFixture {
     }
 
     /// @dev Recognisable values throughout, so a forwarding test can tell them apart.
-    function _params() internal pure returns (IAirlock.CreateParams memory p) {
+    function _params() internal view returns (IAirlock.CreateParams memory p) {
+        return _paramsFor(address(numeraire), address(initializer));
+    }
+
+    /// @dev Lets a test vary only the two fields the launcher reasons about.
+    function _paramsFor(address numeraire_, address initializer_)
+        internal
+        pure
+        returns (IAirlock.CreateParams memory p)
+    {
         p.initialSupply = 1_000_000 ether;
         p.numTokensToSell = 500_000 ether;
-        p.numeraire = address(0x4200000000000000000000000000000000000006);
+        p.numeraire = numeraire_;
         p.tokenFactory = address(0x70E3);
         p.tokenFactoryData = hex"1234";
         p.governanceFactory = address(0x90C0);
         p.governanceFactoryData = hex"5678";
-        p.poolInitializer = address(0xB0071);
+        p.poolInitializer = initializer_;
         p.poolInitializerData = hex"abcd";
         p.liquidityMigrator = address(0x111111);
         p.liquidityMigratorData = hex"dcba";

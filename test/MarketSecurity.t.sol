@@ -17,28 +17,26 @@ import {
     RevertingERC20,
     SentinelReturningAirlock
 } from "./mocks/Adversarial.sol";
+import {DrainingInitializer, MockDopplerHookInitializer} from "./mocks/MockDopplerHookInitializer.sol";
 import {FeeOnTransferERC20, MockERC20} from "./mocks/MockERC20.sol";
-import {MockMulticurvePool} from "./mocks/MockMulticurvePool.sol";
 
 /**
  * @dev Adversarial coverage for the market half: broken wiring, hostile tokens, and the window
  *      between the launcher asking the Airlock for a market and recording the answer.
  */
 contract MarketSecurity_T is MarketFixture {
-    MockMulticurvePool pool;
-
     function setUp() public {
         _deployMarket();
         _launchedMarket();
-
-        pool = new MockMulticurvePool(address(asset), address(numeraire));
     }
 
-    function _accrue(MockERC20 token, uint256 amount) internal {
-        MockMulticurvePool feeder = new MockMulticurvePool(address(asset), address(token));
-        token.mint(address(feeder), amount);
-        feeder.setFees(0, amount);
-        splitter.collectPoolFees(feeder);
+    /// @dev Launches a second market whose asset is `token`, so a hostile token is reached through
+    ///      a real pool rather than credited directly.
+    function _launchWith(address token, uint256 repoId, address holder) internal {
+        _registerRepo(repoId, OWNER_ID, holder);
+        airlock.setAsset(token);
+        vm.prank(holder);
+        launcher.launch(repoId, _params());
     }
 
     // --- wiring -------------------------------------------------------------
@@ -68,8 +66,6 @@ contract MarketSecurity_T is MarketFixture {
         new RIKRoyaltySplitter(IERC721(address(rik)), IAirlock(address(0)), address(launcher), protocolOwner);
     }
 
-    /// @dev The quietest broken deployment of the three: no market could ever be registered, so
-    ///      every pool would resolve as unknown and no repository would be paid.
     function test_SplitterRejectsZeroLauncher() public {
         vm.expectRevert(RIKRoyaltySplitter.InvalidWiring.selector);
         new RIKRoyaltySplitter(IERC721(address(rik)), airlock, address(0), protocolOwner);
@@ -80,14 +76,42 @@ contract MarketSecurity_T is MarketFixture {
         new RIKRoyaltySplitter(IERC721(address(rik)), airlock, address(launcher), address(0));
     }
 
-    // --- the launch window --------------------------------------------------
+    // --- the launch guarantees ----------------------------------------------
 
     /**
-     * @dev The launcher claims a repository's slot before handing control to the Airlock.
-     *
-     * `nonReentrant` already stops a nested launch, but one market per repository is what the
-     * splitter's reverse mapping depends on, so it is held independently: an Airlock looking at the
-     * launcher mid-create sees the slot already taken.
+     * @dev Doppler fixes a pool's beneficiaries at creation, so a market launched without the
+     *      splitter registered would accrue nothing for the repository and could not be corrected.
+     *      The launcher rejects the launch instead.
+     */
+    function test_RejectsLaunchWhenSplitterIsNotABeneficiary() public {
+        MockERC20 otherAsset = new MockERC20("Other", "OTHER");
+        _registerRepo(222, OWNER_ID, bob);
+
+        airlock.setAsset(address(otherAsset));
+        airlock.setIntegratorShares(0);
+
+        vm.prank(bob);
+        vm.expectRevert(abi.encodeWithSelector(RIKLauncher.SplitterNotBeneficiary.selector, 222, address(initializer)));
+        launcher.launch(222, _params());
+
+        assertEq(launcher.marketOf(222), address(0), "a refused launch must leave no market");
+        assertEq(splitter.repoIdOf(address(otherAsset)), 0);
+    }
+
+    /// @dev Fees are released as ERC20 transfers, so a native numeraire would be paid as value the
+    ///      splitter can neither receive nor account for.
+    function test_RejectsNativeNumeraire() public {
+        _registerRepo(222, OWNER_ID, bob);
+
+        vm.prank(bob);
+        vm.expectRevert(RIKLauncher.NativeNumeraireUnsupported.selector);
+        launcher.launch(222, _paramsFor(address(0), address(initializer)));
+    }
+
+    /**
+     * @dev The launcher reserves a repository's market slot before handing control to the Airlock.
+     *      `nonReentrant` already prevents a nested launch; the reservation makes
+     *      one-market-per-repository hold even if that guard were removed.
      */
     function test_SlotIsReservedBeforeTheAirlockIsCalled() public {
         ObservingAirlock observer = new ObservingAirlock(address(asset), 222333);
@@ -132,26 +156,26 @@ contract MarketSecurity_T is MarketFixture {
 
     // --- market registration ------------------------------------------------
 
-    /// @dev A zero asset would make every pool holding the zero address on one side resolve to a
-    ///      repository.
     function test_RegisterMarketRejectsZeroAsset() public {
         vm.prank(address(launcher));
         vm.expectRevert(RIKRoyaltySplitter.InvalidAsset.selector);
-        splitter.registerMarket(address(0), REPO_ID);
+        splitter.registerMarket(address(0), address(initializer), REPO_ID);
     }
 
     // --- payout recipients --------------------------------------------------
 
     /// @dev Not every ERC20 reverts on a transfer to zero, and a bucket empties only once, so an
-    ///      unchecked recipient is a one-shot way to burn a repository's earnings.
+    ///      unchecked recipient would permanently destroy a repository's earnings.
     function test_ClaimRejectsZeroRecipient() public {
-        _accrue(numeraire, 3 ether);
+        _earn(address(asset), 3 ether, 0);
+        splitter.collectPoolFees(address(asset));
+        (address currency0,) = _currenciesOf(address(asset));
 
         vm.prank(alice);
         vm.expectRevert(RIKRoyaltySplitter.InvalidRecipient.selector);
-        splitter.claim(REPO_ID, address(numeraire), address(0));
+        splitter.claim(REPO_ID, currency0, address(0));
 
-        assertEq(splitter.claimable(REPO_ID, address(numeraire)), 3 ether, "the bucket must survive");
+        assertEq(splitter.claimable(REPO_ID, currency0), 3 ether, "the bucket must survive");
     }
 
     function test_CollectIntegratorFeesRejectsZeroRecipient() public {
@@ -165,73 +189,100 @@ contract MarketSecurity_T is MarketFixture {
 
     // --- hostile tokens -----------------------------------------------------
 
-    /// @dev A payout that cannot be delivered must leave the bucket intact, so the holder can try
-    ///      again to a different recipient.
+    /// @dev A payout that cannot be delivered must leave the bucket intact, so the holder can retry
+    ///      to a different recipient.
     function test_UndeliverablePayoutLeavesTheBucketIntact() public {
         RevertingERC20 hostile = new RevertingERC20();
+        _launchWith(address(hostile), 222, bob);
 
-        MockMulticurvePool feeder = new MockMulticurvePool(address(asset), address(hostile));
-        hostile.mint(address(feeder), 4 ether);
-        feeder.setFees(0, 4 ether);
-        splitter.collectPoolFees(feeder);
-        assertEq(splitter.claimable(REPO_ID, address(hostile)), 4 ether);
+        hostile.mint(address(initializer), 4 ether);
+        (address c0,) = _currenciesOf(address(hostile));
+        bool assetIsZero = c0 == address(hostile);
+        initializer.accrue(address(hostile), assetIsZero ? 4 ether : 0, assetIsZero ? 0 : 4 ether);
+        splitter.collectPoolFees(address(hostile));
+        assertEq(splitter.claimable(222, address(hostile)), 4 ether);
 
         hostile.setBlocked(true);
-        vm.prank(alice);
+        vm.prank(bob);
         vm.expectRevert(RevertingERC20.TransferDisabled.selector);
-        splitter.claim(REPO_ID, address(hostile), alice);
+        splitter.claim(222, address(hostile), bob);
 
-        assertEq(splitter.claimable(REPO_ID, address(hostile)), 4 ether, "the bucket must survive");
+        assertEq(splitter.claimable(222, address(hostile)), 4 ether, "the bucket must survive");
 
-        // And once the token works again, the same bucket pays out exactly once.
         hostile.setBlocked(false);
-        vm.prank(alice);
-        assertEq(splitter.claim(REPO_ID, address(hostile), alice), 4 ether);
-        assertEq(splitter.claimable(REPO_ID, address(hostile)), 0);
+        vm.prank(bob);
+        assertEq(splitter.claim(222, address(hostile), bob), 4 ether);
+        assertEq(splitter.claimable(222, address(hostile)), 0);
     }
 
     /// @dev The non-compliant ERC20 {SafeERC20} exists for: reports failure instead of reverting.
+    ///      Doppler's release path requires a successful transfer, so nothing is ever credited.
     function test_TokenReportingFailureIsTreatedAsAFailure() public {
         FalseReturningERC20 silent = new FalseReturningERC20();
+        _launchWith(address(silent), 222, bob);
 
-        MockMulticurvePool feeder = new MockMulticurvePool(address(asset), address(silent));
-        silent.mint(address(feeder), 4 ether);
-        feeder.setFees(0, 4 ether);
-        // The pool's own transfer also reports false, so nothing ever arrives and nothing accrues.
+        silent.mint(address(initializer), 4 ether);
+        (address c0,) = _currenciesOf(address(silent));
+        bool assetIsZero = c0 == address(silent);
+        initializer.accrue(address(silent), assetIsZero ? 4 ether : 0, assetIsZero ? 0 : 4 ether);
+
         vm.expectRevert();
-        splitter.collectPoolFees(feeder);
+        splitter.collectPoolFees(address(silent));
     }
 
     /// @dev A token that calls back into the splitter during a payout cannot be paid twice.
     function test_ReentrantTokenCannotDrainABucketTwice() public {
         ReenteringERC20 hostile = new ReenteringERC20();
+        _launchWith(address(hostile), 222, bob);
 
-        MockMulticurvePool feeder = new MockMulticurvePool(address(asset), address(hostile));
-        hostile.mint(address(feeder), 6 ether);
-        feeder.setFees(0, 6 ether);
-        splitter.collectPoolFees(feeder);
+        hostile.mint(address(initializer), 6 ether);
+        (address c0,) = _currenciesOf(address(hostile));
+        bool assetIsZero = c0 == address(hostile);
+        initializer.accrue(address(hostile), assetIsZero ? 6 ether : 0, assetIsZero ? 0 : 6 ether);
+        splitter.collectPoolFees(address(hostile));
 
-        hostile.arm(splitter, REPO_ID);
+        hostile.arm(splitter, 222);
 
-        vm.prank(alice);
-        uint256 claimed = splitter.claim(REPO_ID, address(hostile), alice);
+        vm.prank(bob);
+        uint256 claimed = splitter.claim(222, address(hostile), bob);
 
         assertEq(claimed, 6 ether);
         assertTrue(hostile.reentered(), "the callback must have been reached");
         assertFalse(hostile.reentrySucceeded(), "the reentrant claim must have failed");
-        assertEq(splitter.claimable(REPO_ID, address(hostile)), 0);
-        assertEq(hostile.balanceOf(alice), 6 ether, "paid exactly once");
+        assertEq(splitter.claimable(222, address(hostile)), 0);
+        assertEq(hostile.balanceOf(bob), 6 ether, "paid exactly once");
+    }
+
+    /// @dev An initializer that removes tokens instead of paying them must revert, not wrap around
+    ///      into an enormous credit that would drain every other repository's bucket.
+    function test_CollectPoolFeesRevertsWhenBalanceShrinks() public {
+        _earn(address(asset), 5 ether, 5 ether);
+        splitter.collectPoolFees(address(asset));
+
+        DrainingInitializer draining = new DrainingInitializer(1 ether);
+        MockERC20 otherAsset = new MockERC20("Other", "OTHER");
+        _registerRepo(222, OWNER_ID, bob);
+        airlock.setAsset(address(otherAsset));
+        vm.prank(bob);
+        launcher.launch(222, _paramsFor(address(numeraire), address(draining)));
+
+        vm.expectRevert();
+        splitter.collectPoolFees(address(otherAsset));
     }
 
     // --- ownership ----------------------------------------------------------
 
     /**
-     * @dev Renouncing remains available. This records its effect: the sweep is permanently
-     *      disabled and repository buckets are unaffected, because the owner never had authority
-     *      over them.
+     * @dev Renouncing is available, and this records its effect: the sweep is permanently disabled
+     *      and repository buckets are unaffected, because the owner has no authority over those.
      */
     function test_RenouncingOwnershipDisablesOnlyTheSweep() public {
-        _accrue(numeraire, 7 ether);
+        _earn(address(asset), 0, 7 ether);
+        splitter.collectPoolFees(address(asset));
+        (, address currency1) = _currenciesOf(address(asset));
+        uint256 owed = splitter.claimable(REPO_ID, currency1);
+        assertGt(owed, 0);
+
         numeraire.mint(address(airlock), 5 ether);
         airlock.setFees(address(splitter), address(numeraire), 5 ether);
 
@@ -243,84 +294,83 @@ contract MarketSecurity_T is MarketFixture {
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, protocolOwner));
         splitter.collectIntegratorFees(address(numeraire), protocolOwner);
 
-        // The repository is untouched and can still be paid.
         vm.prank(alice);
-        assertEq(splitter.claim(REPO_ID, address(numeraire), alice), 7 ether);
+        assertEq(splitter.claim(REPO_ID, currency1, alice), owed);
     }
 
     // --- fuzz ---------------------------------------------------------------
 
-    /// @dev The credited amount equals the amount that arrived, across the uint96 range.
+    /// @dev Whatever arrives is what is credited, across the whole uint96 range.
     /// forge-config: default.fuzz.runs = 2048
     /// forge-config: deep.fuzz.runs = 25000
     function testFuzz_AccrualEqualsTheBalanceDelta(uint96 fees0, uint96 fees1) public {
-        asset.mint(address(pool), fees0);
-        numeraire.mint(address(pool), fees1);
-        pool.setFees(fees0, fees1);
+        (address currency0, address currency1) = _currenciesOf(address(asset));
+        _earn(address(asset), fees0, fees1);
 
-        uint256 before0 = asset.balanceOf(address(splitter));
-        uint256 before1 = numeraire.balanceOf(address(splitter));
+        uint256 before0 = MockERC20(currency0).balanceOf(address(splitter));
+        uint256 before1 = MockERC20(currency1).balanceOf(address(splitter));
 
-        (uint256 amount0, uint256 amount1) = splitter.collectPoolFees(pool);
+        (uint256 amount0, uint256 amount1) = splitter.collectPoolFees(address(asset));
 
-        assertEq(amount0, asset.balanceOf(address(splitter)) - before0);
-        assertEq(amount1, numeraire.balanceOf(address(splitter)) - before1);
-        assertEq(splitter.claimable(REPO_ID, address(asset)), amount0);
-        assertEq(splitter.claimable(REPO_ID, address(numeraire)), amount1);
+        assertEq(amount0, MockERC20(currency0).balanceOf(address(splitter)) - before0);
+        assertEq(amount1, MockERC20(currency1).balanceOf(address(splitter)) - before1);
+        assertEq(splitter.claimable(REPO_ID, currency0), amount0);
+        assertEq(splitter.claimable(REPO_ID, currency1), amount1);
     }
 
-    /// @dev A claim pays the entire bucket and leaves it empty, for any amount.
+    /// @dev A claim pays the whole bucket and leaves nothing behind, for any amount.
     /// forge-config: default.fuzz.runs = 2048
     /// forge-config: deep.fuzz.runs = 25000
     function testFuzz_ClaimPaysExactlyTheBucket(uint96 amount, address recipient) public {
         vm.assume(amount != 0);
-        vm.assume(recipient != address(0) && recipient != address(splitter));
+        vm.assume(recipient != address(0) && recipient != address(splitter) && recipient != address(initializer));
 
-        numeraire.mint(address(pool), amount);
-        pool.setFees(0, amount);
-        splitter.collectPoolFees(pool);
+        (address currency0,) = _currenciesOf(address(asset));
+        _earn(address(asset), amount, 0);
+        splitter.collectPoolFees(address(asset));
 
-        uint256 before = numeraire.balanceOf(recipient);
+        uint256 before = MockERC20(currency0).balanceOf(recipient);
 
         vm.prank(alice);
-        uint256 claimed = splitter.claim(REPO_ID, address(numeraire), recipient);
+        uint256 claimed = splitter.claim(REPO_ID, currency0, recipient);
 
         assertEq(claimed, amount);
-        assertEq(numeraire.balanceOf(recipient) - before, amount);
-        assertEq(splitter.claimable(REPO_ID, address(numeraire)), 0);
+        assertEq(MockERC20(currency0).balanceOf(recipient) - before, amount);
+        assertEq(splitter.claimable(REPO_ID, currency0), 0);
     }
 
-    /// @dev A token that keeps part of every transfer must never create a claim that cannot be
-    ///      paid, at any fee rate.
+    /// @dev A token that keeps part of every transfer must never create a claim that cannot be paid.
     /// forge-config: default.fuzz.runs = 1024
     /// forge-config: deep.fuzz.runs = 10000
     function testFuzz_FeeOnTransferNeverOvercredits(uint96 amount, uint16 rawFeeBps) public {
         uint256 feeBps = bound(uint256(rawFeeBps), 0, 9_999);
         FeeOnTransferERC20 taxed = new FeeOnTransferERC20("Taxed", "TAX", feeBps);
+        _launchWith(address(taxed), 222, bob);
 
-        MockMulticurvePool feeder = new MockMulticurvePool(address(asset), address(taxed));
-        taxed.mint(address(feeder), amount);
-        feeder.setFees(0, amount);
+        taxed.mint(address(initializer), amount);
+        (address c0,) = _currenciesOf(address(taxed));
+        bool assetIsZero = c0 == address(taxed);
+        initializer.accrue(address(taxed), assetIsZero ? amount : 0, assetIsZero ? 0 : amount);
 
-        (, uint256 credited) = splitter.collectPoolFees(feeder);
+        splitter.collectPoolFees(address(taxed));
 
-        assertLe(credited, uint256(amount));
-        assertLe(splitter.claimable(REPO_ID, address(taxed)), taxed.balanceOf(address(splitter)));
+        assertLe(splitter.claimable(222, address(taxed)), taxed.balanceOf(address(splitter)));
     }
 
     /// @dev Accrual accumulates exactly, over any sequence of collections.
     /// forge-config: default.fuzz.runs = 512
     /// forge-config: deep.fuzz.runs = 5000
     function testFuzz_AccrualAccumulatesExactly(uint96[8] calldata amounts) public {
+        (address currency0,) = _currenciesOf(address(asset));
         uint256 expected;
+
         for (uint256 i = 0; i < amounts.length; ++i) {
-            numeraire.mint(address(pool), amounts[i]);
-            pool.setFees(0, amounts[i]);
-            splitter.collectPoolFees(pool);
+            _earn(address(asset), amounts[i], 0);
+            splitter.collectPoolFees(address(asset));
             expected += uint256(amounts[i]);
         }
 
-        assertEq(splitter.claimable(REPO_ID, address(numeraire)), expected);
-        assertEq(numeraire.balanceOf(address(splitter)), expected);
+        assertEq(splitter.claimable(REPO_ID, currency0), expected);
+        assertEq(MockERC20(currency0).balanceOf(address(splitter)), expected);
     }
 }

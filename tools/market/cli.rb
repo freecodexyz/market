@@ -22,7 +22,7 @@ module Market
         market show <repoId>       show the market launched for a repository
 
         royalty show <repoId> <token>     show what the current holder can withdraw
-        royalty collect <pool>            push a pool's fees into its repository's bucket
+        royalty collect <asset>           push a market's fees into its repository's bucket
         royalty claim <repoId> <token>    withdraw a bucket as the current holder
 
       Options:
@@ -159,7 +159,7 @@ module Market
     def royalty
       case (subcommand = argv.shift)
       when "show" then registry.claimable(repo_id!, address!("token"))
-      when "collect" then registry.collect(address!("pool"))
+      when "collect" then registry.collect(address!("asset"))
       when "claim" then registry.claim(repo_id!, address!("token"), options[:to])
       else
         raise Error, "unknown royalty subcommand: #{subcommand.inspect}"
