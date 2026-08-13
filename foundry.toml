@@ -1,0 +1,51 @@
+[profile.default]
+src = "src"
+out = "out"
+libs = ["lib"]
+ffi = true
+
+# Pinned so a build is reproducible and the verified bytecode of a deployment can be regenerated
+# years later. Without this the toolchain silently tracks the newest compiler it can find.
+solc = "0.8.35"
+
+# Pinned rather than left to the toolchain default, which tracks the newest fork solc knows about
+# and would emit opcodes Base has not activated. Cancun is the oldest target that still has
+# transient storage, which is what makes ReentrancyGuardTransient usable.
+evm_version = "cancun"
+
+# via-ir is required here, not merely preferred: the legacy pipeline runs out of stack while
+# building the RIK metadata JSON once the optimizer is enabled.
+optimizer = true
+optimizer_runs = 200
+via_ir = true
+
+[fuzz]
+runs = 1024
+# The claim and metadata fuzzers reject a lot of inputs through `vm.assume`; the default ceiling is
+# low enough that a healthy test can look like a failure.
+max_test_rejects = 500000
+
+[invariant]
+runs = 128
+depth = 128
+# Handlers deliberately attempt calls that must fail, and a reverted call is a result rather than a
+# problem. What stops that from making a campaign vacuous is the `afterInvariant` call counters.
+fail_on_revert = false
+shrink_run_limit = 5000
+
+# A soak profile for before a release or after touching anything in `src/`:
+#
+#   FOUNDRY_PROFILE=deep forge test
+#
+# Everything else is inherited from the default profile.
+[profile.deep.fuzz]
+runs = 50000
+max_test_rejects = 5000000
+
+[profile.deep.invariant]
+runs = 1024
+depth = 256
+fail_on_revert = false
+shrink_run_limit = 5000
+
+# See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options

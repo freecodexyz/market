@@ -1,0 +1,157 @@
+name: CI
+
+permissions: {}
+
+on:
+  push:
+    paths:
+      - "src/**"
+      - "test/**"
+      - "script/**"
+      - "tools/**"
+      - "bin/**"
+      - "smoke-test.sh"
+      - "foundry.toml"
+      - "remappings.txt"
+      - ".github/workflows/test-contracts.yml"
+  pull_request:
+    paths:
+      - "src/**"
+      - "test/**"
+      - "script/**"
+      - "tools/**"
+      - "bin/**"
+      - "smoke-test.sh"
+      - "foundry.toml"
+      - "remappings.txt"
+      - ".github/workflows/test-contracts.yml"
+  workflow_dispatch:
+  schedule:
+    # Weekly soak, so a rare fuzz counterexample gets found on a schedule rather than by luck.
+    - cron: "0 4 * * 1"
+
+jobs:
+  check:
+    name: Foundry project
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          submodules: recursive
+
+      # The test suite signs its JWT fixtures through `vm.ffi` with Node.
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+
+      - name: Show Forge version
+        run: forge --version
+
+      - name: Run Forge fmt
+        run: forge fmt --check
+
+      - name: Run Forge lint
+        run: forge lint --deny-warnings
+
+      - name: Run Forge build
+        run: forge build --sizes
+
+      - name: Run Forge tests
+        run: forge test -vvv
+
+  # Separate from `check` because slither builds with `--skip ./test/**`, which leaves the Foundry
+  # cache without test artifacts and makes a subsequent `forge test` find nothing.
+  static:
+    name: Static analysis
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          submodules: recursive
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+
+      - name: Install slither
+        run: pip install slither-analyzer
+
+      # Configuration, including which findings are accepted and why, lives in slither.config.json
+      # and in SECURITY.md.
+      - name: Run slither
+        run: slither .
+
+  smoke:
+    name: Operator path
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          submodules: recursive
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.2"
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+
+      # Covers what `forge test` cannot: the deploy scripts closing the launcher/splitter circle on
+      # a real chain, and the CLI reading back what it wrote.
+      - name: Start anvil
+        run: anvil --silent &
+
+      - name: Wait for anvil
+        run: |
+          for _ in $(seq 1 30); do
+            cast chain-id --rpc-url http://127.0.0.1:8545 >/dev/null 2>&1 && exit 0
+            sleep 1
+          done
+          echo "anvil did not come up" >&2
+          exit 1
+
+      - name: Run the smoke test
+        run: ./smoke-test.sh
+
+  # The default profile keeps a pull request fast. This is the long version: many more fuzz inputs
+  # and much deeper invariant campaigns, which is where the shallow-but-wide bugs actually surface.
+  soak:
+    name: Deep fuzz and invariants
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          submodules: recursive
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+
+      - name: Run the deep profile
+        run: FOUNDRY_PROFILE=deep forge test -vvv

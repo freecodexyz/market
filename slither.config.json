@@ -1,0 +1,8 @@
+{
+  "filter_paths": "lib/|test/|script/|src/GithubOidcVerifier.sol|src/JsonClaim.sol|src/IJwtVerifier.sol",
+  "exclude_dependencies": true,
+  "exclude_informational": false,
+  "exclude_low": false,
+  "detectors_to_exclude": "assembly,cyclomatic-complexity",
+  "fail_on": "medium"
+}
