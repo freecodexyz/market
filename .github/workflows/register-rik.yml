@@ -27,6 +27,13 @@ jobs:
     name: Prove and register
     runs-on: ubuntu-latest
     steps:
+      # Only the helper script is needed. Nothing in this job reads the rest of the repository, and
+      # the checkout is what makes `.github/scripts/app-token.mjs` present on disk.
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+
       - name: Parse the request
         id: parse
         env:
@@ -153,28 +160,45 @@ jobs:
         run: |
           set -euo pipefail
 
+          # A registry that has not been deployed and wired up yet is an operator state, not a
+          # problem with the request. Report it as one rather than failing inside `cast`.
+          if [ -z "${RIK_ADDRESS:-}" ] || [ -z "${RPC_URL:-}" ] || [ -z "${REGISTRAR_PRIVATE_KEY:-}" ]; then
+            echo "status=unconfigured" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
           # Ask the contract what audience to request, rather than reimplementing the encoding here.
           # The two cannot drift apart if only one of them defines the format.
           audience="$(cast call "$RIK_ADDRESS" "audienceOf(address,uint256,uint256)(string)" \
             "$WALLET" "$REPO_ID" "$OWNER_ID" --rpc-url "$RPC_URL" | sed 's/^"//; s/"$//')"
           echo "Requesting a token for audience: $audience"
 
+          if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ] || [ -z "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" ]; then
+            echo '::error::no OIDC request credentials; this job needs id-token: write'
+            exit 1
+          fi
+
           encoded="$(jq -rn --arg v "$audience" '$v|@uri')"
-          token="$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$encoded" | jq -r '.value')"
+          response="$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$encoded")"
+          token="$(printf '%s' "$response" | jq -r '.value // empty')"
 
-          header_b64="$(printf '%s' "$token" | cut -d. -f1)"
-          payload_b64="$(printf '%s' "$token" | cut -d. -f2)"
-          signature_b64="$(printf '%s' "$token" | cut -d. -f3)"
+          if [ -z "$token" ]; then
+            echo "::error::the OIDC provider returned no token"
+            printf '%s\n' "$response" | head -5
+            exit 1
+          fi
 
-          # The contract addresses keys by keccak of the raw `kid` string; this must stay identical
-          # to how the identity repository's key sync stores them.
-          kid_text="$(printf '%s' "$header_b64" | basenc --base64url -d 2>/dev/null | jq -r '.kid')"
+          # Decoded in Node because a JWS uses unpadded base64url, which shell base64 decoders
+          # reject. The contract addresses signing keys by keccak of the raw `kid` string, which
+          # must stay identical to how the identity repository's key sync stores them.
+          decoded="$(node .github/scripts/decode-jwt.mjs "$token")"
+          kid_text="$(printf '%s\n' "$decoded" | sed -n '1p')"
+          header="$(printf '%s\n' "$decoded" | sed -n '2p')"
+          payload="$(printf '%s\n' "$decoded" | sed -n '3p')"
+          signature="$(printf '%s\n' "$decoded" | sed -n '4p')"
+
           kid="$(cast keccak "$kid_text")"
-
-          signature="0x$(printf '%s' "$signature_b64" | basenc --base64url -d 2>/dev/null | xxd -p | tr -d '\n')"
-          header="0x$(printf '%s' "$header_b64" | xxd -p | tr -d '\n')"
-          payload="0x$(printf '%s' "$payload_b64" | xxd -p | tr -d '\n')"
 
           args=("$kid" "$header" "$payload" "$signature" "$REPO_ID" "$OWNER_ID" "$ACTOR_ID" "$WALLET")
           signature_abi="register(bytes32,bytes,bytes,bytes,uint256,uint256,uint256,address)"
@@ -234,6 +258,8 @@ jobs:
           \`\`\`
           TEXT
           )
+          elif [ "$REGISTER_STATUS" = "unconfigured" ]; then
+            body="Control of \`$SLUG\` was confirmed via \`$CONTROL_METHOD\`, but this repository has no registry configured yet, so nothing was submitted. Re-open once \`FCF_RIK_ADDRESS\`, \`FCF_RPC_URL\` and \`FCF_REGISTRAR_PRIVATE_KEY\` are set."
           elif [ "$REGISTER_STATUS" = "rejected" ]; then
             body=$(printf 'Control confirmed via `%s`, but the chain rejected the registration:\n\n```\n%s\n```' "$CONTROL_METHOD" "$REGISTER_REASON")
           elif [ "$REGISTER_STATUS" = "ok" ]; then
@@ -242,8 +268,8 @@ jobs:
             body="Something went wrong before the registration ran. Check the workflow logs."
           fi
 
-          gh issue comment "$ISSUE" --body "$body"
+          gh issue comment "$ISSUE" --repo "$GITHUB_REPOSITORY" --body "$body"
 
           if [ "$REGISTER_STATUS" = "ok" ]; then
-            gh issue close "$ISSUE"
+            gh issue close "$ISSUE" --repo "$GITHUB_REPOSITORY"
           fi

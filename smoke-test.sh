@@ -117,14 +117,28 @@ require "$(cast call "$RIK" "attestationRepoId()(uint64)" --rpc-url "$RPC_URL" |
   "$ATTESTATION_REPO_ID" "the pinned attestation repository"
 
 echo "==> registering $REPO_ID from a real signed proof"
-read -r KID HEADER PAYLOAD SIG MODULUS EXPONENT <<<"$(
+# The fixture is assembled into a compact JWS and then taken apart by the same script the
+# attestation workflow uses, so the workflow's decoding is exercised here rather than only in CI.
+read -r JWT KID MODULUS EXPONENT <<<"$(
   node test/fixtures/load-fixture.mjs test/fixtures/sample-jwt.json "$REPO_ID" "$OWNER_ID" "$ACTOR_ID" "$WALLET" \
     | sed 's/^0x//' | xxd -r -p | ruby -rjson -e '
       f = JSON.parse(STDIN.read)
-      hex = ->(s) { "0x" + s.unpack1("H*") }
-      puts [f["kid"], hex[f["headerB64"]], hex[f["payloadB64"]], f["signature"], f["modulus"], f["exponent"]].join(" ")
+      signature = [f["signature"].sub(/\A0x/, "")].pack("H*")
+      jwt = [f["headerB64"], f["payloadB64"], [signature].pack("m0").tr("+/", "-_").delete("=")].join(".")
+      puts [jwt, f["kid"], f["modulus"], f["exponent"]].join(" ")
     '
 )"
+
+DECODED="$(node .github/scripts/decode-jwt.mjs "$JWT")"
+KID_TEXT="$(printf '%s\n' "$DECODED" | sed -n '1p')"
+HEADER="$(printf '%s\n' "$DECODED" | sed -n '2p')"
+PAYLOAD="$(printf '%s\n' "$DECODED" | sed -n '3p')"
+SIG="$(printf '%s\n' "$DECODED" | sed -n '4p')"
+
+# The fixtures address keys by a padded-ASCII kid, while the live verifier keys them by
+# `keccak256(kid)`. Only the workflow computes that hash, so the kid used here comes from the
+# fixture and what is checked is that the decoder read the header correctly.
+require "$KID_TEXT" "kid-001" "the kid the decoder read from the header"
 
 cast send "$VERIFIER" "addKey(bytes32,bytes,bytes)" "$KID" "$MODULUS" "$EXPONENT" \
   --rpc-url "$RPC_URL" --private-key "$PRIVATE_KEY" >/dev/null
