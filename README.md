@@ -103,7 +103,7 @@ The CLI is Ruby 3.2, standard library only, no bundler:
 ./bin/market rik show 1296269
 ./bin/market market show 1296269
 ./bin/market royalty show 1296269 <token>
-./bin/market royalty collect <pool>          # permissionless: push fees into a repository's bucket
+./bin/market royalty collect <asset>         # permissionless: push fees into a repository's bucket
 ./bin/market royalty claim 1296269 <token>   # as the current key holder
 ```
 
@@ -140,6 +140,97 @@ forge create --rpc-url "$MARKET_RPC_URL" --private-key "$PRIVATE_KEY" --broadcas
 
 `market deploy` rejects a verifier address with no code, so omitting this step fails immediately
 rather than producing a registry that rejects every proof.
+
+## Launching a market
+
+`RIKLauncher.launch` forwards `CreateParams` to the Doppler Airlock unchanged except for
+`integrator`, which it overwrites with the splitter. The caller supplies everything else, and two
+fields decide whether the repository will ever be paid.
+
+`poolInitializerData` is an ABI-encoded `InitData` for the chosen initializer:
+
+```solidity
+struct Curve { int24 tickLower; int24 tickUpper; uint16 numPositions; uint256 shares; }
+struct BeneficiaryData { address beneficiary; uint96 shares; }
+
+struct InitData {
+    uint24 fee;
+    int24 tickSpacing;
+    int24 farTick;
+    Curve[] curves;
+    BeneficiaryData[] beneficiaries;
+    address dopplerHook;
+    bytes onInitializationDopplerHookCalldata;
+    bytes graduationDopplerHookCalldata;
+}
+```
+
+`beneficiaries` is the field that matters here. Doppler fixes it when the pool is created and there
+is no way to add an entry afterwards, so a market launched without the splitter in the list would
+accrue nothing for the repository, permanently. `RIKLauncher` therefore reads
+`getShares(poolId, splitter)` after creation and reverts with `SplitterNotBeneficiary` if it is zero.
+
+Doppler's own rules, enforced by `storeBeneficiaries`:
+
+- addresses strictly ascending and unique, each with `shares > 0`
+- shares denominated in WAD, summing to exactly `1e18`
+- `airlock.owner()` must be included with at least `1e18 / 20` (5%)
+- an empty array stores no beneficiaries at all, which this launcher rejects
+
+So a minimal list has three entries — the Doppler protocol owner, the splitter, and whoever else the
+launcher wants — sorted by address:
+
+```solidity
+address splitter = address(launcher.splitter());
+address protocolOwner = Airlock(airlock).owner();
+
+BeneficiaryData[] memory beneficiaries = new BeneficiaryData[](2);
+// Sort ascending by address before encoding; the order is validated on-chain.
+(beneficiaries[0], beneficiaries[1]) = protocolOwner < splitter
+    ? (BeneficiaryData(protocolOwner, 0.05e18), BeneficiaryData(splitter, 0.95e18))
+    : (BeneficiaryData(splitter, 0.95e18), BeneficiaryData(protocolOwner, 0.05e18));
+
+params.poolInitializer = 0xbdf938149aC6a781f94FAa0Ed45E6a0e984c6544; // DopplerHookInitializer
+params.poolInitializerData = abi.encode(InitData({ ..., beneficiaries: beneficiaries, ... }));
+params.numeraire = <an ERC20>;                                       // not address(0)
+```
+
+`numeraire` must be an ERC20. Fees are released as ERC20 transfers, and the splitter cannot hold
+native value, so `launch` rejects `address(0)` with `NativeNumeraireUnsupported`.
+
+Note that `Airlock.create` returns the **asset** address in its `pool` slot for a V4 initializer,
+because Uniswap V4 pools have no address. The pool is identified by the `PoolKey` the initializer
+stores against the asset, which is what the splitter reads back when collecting.
+
+## External addresses
+
+The Doppler Airlock `--airlock` points at. It is immutable in both the launcher and the splitter, so
+a wrong value cannot be corrected after deployment, and it fails quietly rather than loudly: markets
+still launch, and the fees simply never arrive anywhere the splitter can collect them.
+
+| Network | Airlock |
+| --- | --- |
+| Base Mainnet (8453) | `0x660eAaEdEBc968f8f3694354FA8EC0b4c5Ba8D12` |
+| Base Sepolia (84532) | `0x3411306Ce66c9469BFF1535BA955503c4Bde1C6e` |
+
+The pool initializer is chosen per launch through `CreateParams.poolInitializer`, not configured
+here. On Base Mainnet the two that expose the fee interface this project collects through are
+`DopplerHookInitializer` at `0xbdf938149ac6a781f94faa0ed45e6a0e984c6544` and
+`RehypeDopplerHookInitializer` at `0xbd54a9e1d2249185a27af097abaa930631ec45c5`. A launch must
+register the splitter as a fee beneficiary in `poolInitializerData`; `RIKLauncher` rejects one that
+does not, because beneficiaries are fixed when the pool is created.
+
+Source: [Doppler's contract addresses](https://docs.doppler.lol/resources/contract-addresses). Verify
+before relying on either — Doppler redeploys, and this table can go stale:
+
+```shell
+cast code <airlock> --rpc-url "$MARKET_RPC_URL"                        # must not be 0x
+cast call <airlock> "getIntegratorFees(address,address)(uint256)" \
+  0x0000000000000000000000000000000000000001 <token> --rpc-url "$MARKET_RPC_URL"
+```
+
+The second call is the one that matters: it is the interface `RIKRoyaltySplitter` depends on, and an
+address with code but a different ABI is the failure this catches.
 
 ## Notes for contributors
 

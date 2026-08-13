@@ -94,16 +94,23 @@ module Market
       amount
     end
 
-    # Pushes a pool's accrued fees into the owning repository's bucket. Permissionless, so it is
+    # Pushes a market's accrued fees into the owning repository's bucket. Permissionless, so it is
     # safe to run for another repository; this is the entry point a keeper would use.
-    def collect(pool)
+    #
+    # The market is named by its asset, which is what the launcher recorded. Doppler holds fees in
+    # its initializer and releases only a beneficiary's share, so the splitter has to make this call
+    # itself; a keeper is paying the gas, not collecting the fees.
+    def collect(asset)
       deployment.require_deployment!
       # Refuse to spend gas on a chain other than the one configured.
       deployment.require_expected_chain!
 
-      UI.step "collecting fees from #{pool}"
+      repo_id = chain.call_integer(deployment.config.splitter, "repoIdOf(address)(uint256)", asset)
+      raise InvalidState, "#{asset} is not a launched market" if repo_id.zero?
+
+      UI.step "collecting fees for repository #{repo_id} from #{asset}"
       output = chain.send_transaction(
-        deployment.config.splitter, "collectPoolFees(address)", pool, private_key: deployment.private_key
+        deployment.config.splitter, "collectPoolFees(address)", asset, private_key: deployment.private_key
       )
       UI.ok "sent"
       UI.note output.lines.grep(/transactionHash/).first.to_s.strip

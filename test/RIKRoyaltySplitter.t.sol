@@ -4,33 +4,26 @@ pragma solidity ^0.8.24;
 
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {ReentrancyGuardTransient} from "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
-import {stdError} from "forge-std/StdError.sol";
 
+import {PoolKey} from "../src/IDopplerHookInitializer.sol";
 import {RIKRoyaltySplitter} from "../src/RIKRoyaltySplitter.sol";
 import {MarketFixture} from "./MarketFixture.sol";
-import {FeeOnTransferERC20, MockERC20} from "./mocks/MockERC20.sol";
 import {
-    DrainingMulticurvePool,
-    MockMulticurvePool,
-    ReenteringMulticurvePool,
-    SilentMulticurvePool
-} from "./mocks/MockMulticurvePool.sol";
+    MockDopplerHookInitializer,
+    ReenteringInitializer,
+    SilentInitializer
+} from "./mocks/MockDopplerHookInitializer.sol";
+import {FeeOnTransferERC20, MockERC20} from "./mocks/MockERC20.sol";
 
 contract RIKRoyaltySplitter_T is MarketFixture {
-    MockMulticurvePool pool;
+    address currency0;
+    address currency1;
 
     function setUp() public {
         _deployMarket();
         _launchedMarket();
 
-        pool = new MockMulticurvePool(address(asset), address(numeraire));
-    }
-
-    /// @dev Funds `pool` and has it pay `amount0`/`amount1` to whoever collects.
-    function _fundPool(uint256 amount0, uint256 amount1) internal {
-        asset.mint(address(pool), amount0);
-        numeraire.mint(address(pool), amount1);
-        pool.setFees(amount0, amount1);
+        (currency0, currency1) = _currenciesOf(address(asset));
     }
 
     // --- wiring -------------------------------------------------------------
@@ -54,26 +47,42 @@ contract RIKRoyaltySplitter_T is MarketFixture {
         assertEq(splitter.owner(), bob);
     }
 
+    /// @dev The pool id must match what Uniswap V4 computes. A different value would address a
+    ///      pool that does not exist, and collection would return nothing.
+    function test_PoolIdMatchesUniswapV4() public view {
+        (,,,,, PoolKey memory poolKey,) = initializer.getState(address(asset));
+
+        assertEq(splitter.poolIdOf(poolKey), initializer.poolIdOf(address(asset)));
+        assertEq(splitter.poolIdOf(poolKey), keccak256(abi.encode(poolKey)));
+    }
+
     // --- market registration ------------------------------------------------
 
     function test_RegisterMarketOnlyLauncher() public {
         vm.prank(stranger);
         vm.expectRevert(abi.encodeWithSelector(RIKRoyaltySplitter.CallerIsNotLauncher.selector, stranger));
-        splitter.registerMarket(address(numeraire), 222);
+        splitter.registerMarket(address(numeraire), address(initializer), 222);
     }
 
     /// @dev Not even the owner may bind an asset to a repository.
     function test_RegisterMarketRejectsOwner() public {
         vm.prank(protocolOwner);
         vm.expectRevert(abi.encodeWithSelector(RIKRoyaltySplitter.CallerIsNotLauncher.selector, protocolOwner));
-        splitter.registerMarket(address(numeraire), 222);
+        splitter.registerMarket(address(numeraire), address(initializer), 222);
     }
 
     /// @dev Zero is the "not a market" sentinel, so it can never be a repository id.
     function test_RegisterMarketRejectsZeroRepoId() public {
         vm.prank(address(launcher));
         vm.expectRevert(abi.encodeWithSelector(RIKRoyaltySplitter.InvalidGithubRepoId.selector, 0));
-        splitter.registerMarket(address(numeraire), 0);
+        splitter.registerMarket(address(numeraire), address(initializer), 0);
+    }
+
+    /// @dev A zero initializer would make every collection revert, stranding the repository's fees.
+    function test_RegisterMarketRejectsZeroInitializer() public {
+        vm.prank(address(launcher));
+        vm.expectRevert(RIKRoyaltySplitter.InvalidInitializer.selector);
+        splitter.registerMarket(address(numeraire), address(0), 222);
     }
 
     function test_RegisterMarketRejectsRebinding() public {
@@ -81,225 +90,264 @@ contract RIKRoyaltySplitter_T is MarketFixture {
         vm.expectRevert(
             abi.encodeWithSelector(RIKRoyaltySplitter.MarketAlreadyRegistered.selector, address(asset), REPO_ID)
         );
-        splitter.registerMarket(address(asset), 222);
+        splitter.registerMarket(address(asset), address(initializer), 222);
     }
 
     function test_RepoIdOfIsZeroForUnknownAsset() public view {
         assertEq(splitter.repoIdOf(address(numeraire)), 0);
     }
 
+    /// @dev The initializer is recorded at launch, so a caller cannot aim collection elsewhere.
+    function test_InitializerIsRecordedAtLaunch() public view {
+        assertEq(splitter.initializerOf(address(asset)), address(initializer));
+        assertEq(splitter.initializerOf(address(numeraire)), address(0));
+    }
+
     // --- accrual ------------------------------------------------------------
 
     function test_CollectPoolFeesCreditsBothSides() public {
-        _fundPool(3 ether, 7 ether);
+        _earn(address(asset), 3 ether, 7 ether);
 
-        (uint256 amount0, uint256 amount1) = splitter.collectPoolFees(pool);
+        (uint256 amount0, uint256 amount1) = splitter.collectPoolFees(address(asset));
 
         assertEq(amount0, 3 ether);
         assertEq(amount1, 7 ether);
-        assertEq(splitter.claimable(REPO_ID, address(asset)), 3 ether);
-        assertEq(splitter.claimable(REPO_ID, address(numeraire)), 7 ether);
-        assertEq(asset.balanceOf(address(splitter)), 3 ether);
-        assertEq(numeraire.balanceOf(address(splitter)), 7 ether);
+        assertEq(splitter.claimable(REPO_ID, currency0), 3 ether);
+        assertEq(splitter.claimable(REPO_ID, currency1), 7 ether);
+        assertEq(MockERC20(currency0).balanceOf(address(splitter)), 3 ether);
+        assertEq(MockERC20(currency1).balanceOf(address(splitter)), 7 ether);
     }
 
     function test_CollectPoolFeesEmitsPerToken() public {
-        _fundPool(3 ether, 7 ether);
+        _earn(address(asset), 3 ether, 7 ether);
 
         vm.expectEmit(true, true, false, true);
-        emit RIKRoyaltySplitter.FeesAccrued(REPO_ID, address(asset), 3 ether);
+        emit RIKRoyaltySplitter.FeesAccrued(REPO_ID, currency0, 3 ether);
         vm.expectEmit(true, true, false, true);
-        emit RIKRoyaltySplitter.FeesAccrued(REPO_ID, address(numeraire), 7 ether);
+        emit RIKRoyaltySplitter.FeesAccrued(REPO_ID, currency1, 7 ether);
 
-        splitter.collectPoolFees(pool);
+        splitter.collectPoolFees(address(asset));
     }
 
-    /// @dev Permissionless: calling it for another repository confers no benefit on the caller.
+    /// @dev Anyone may push a repository's earnings into its bucket; there is nothing to gain.
     function test_CollectPoolFeesIsPermissionless() public {
-        _fundPool(3 ether, 0);
+        _earn(address(asset), 3 ether, 0);
 
         vm.prank(stranger);
-        splitter.collectPoolFees(pool);
+        splitter.collectPoolFees(address(asset));
 
-        assertEq(splitter.claimable(REPO_ID, address(asset)), 3 ether);
+        assertEq(splitter.claimable(REPO_ID, currency0), 3 ether);
     }
 
     function test_CollectPoolFeesAccumulatesAcrossCalls() public {
-        _fundPool(3 ether, 0);
-        splitter.collectPoolFees(pool);
+        _earn(address(asset), 3 ether, 0);
+        splitter.collectPoolFees(address(asset));
 
-        _fundPool(5 ether, 0);
-        splitter.collectPoolFees(pool);
+        _earn(address(asset), 5 ether, 0);
+        splitter.collectPoolFees(address(asset));
 
-        assertEq(splitter.claimable(REPO_ID, address(asset)), 8 ether);
+        assertEq(splitter.claimable(REPO_ID, currency0), 8 ether);
     }
 
-    /// @dev Either ordering of the pair resolves to the same repository.
-    function test_CollectPoolFeesAcceptsRegisteredAssetOnEitherSide() public {
-        MockMulticurvePool flipped = new MockMulticurvePool(address(numeraire), address(asset));
-        numeraire.mint(address(flipped), 4 ether);
-        flipped.setFees(4 ether, 0);
+    /// @dev The asset may sort either side of the numeraire; both are credited to the repository.
+    function test_CollectPoolFeesCreditsWhicheverSideTheAssetSortsTo() public {
+        _earn(address(asset), 4 ether, 6 ether);
+        splitter.collectPoolFees(address(asset));
 
-        splitter.collectPoolFees(flipped);
+        uint256 assetSide = splitter.claimable(REPO_ID, address(asset));
+        uint256 numeraireSide = splitter.claimable(REPO_ID, address(numeraire));
 
-        assertEq(splitter.claimable(REPO_ID, address(numeraire)), 4 ether);
+        assertGt(assetSide, 0);
+        assertGt(numeraireSide, 0);
+        assertEq(assetSide + numeraireSide, 10 ether);
     }
 
-    function test_CollectPoolFeesRejectsUnknownPool() public {
-        MockERC20 other = new MockERC20("Other", "OTHER");
-        MockMulticurvePool unknown = new MockMulticurvePool(address(other), address(numeraire));
-
-        vm.expectRevert(abi.encodeWithSelector(RIKRoyaltySplitter.UnknownPool.selector, address(unknown)));
-        splitter.collectPoolFees(unknown);
+    function test_CollectPoolFeesRejectsUnknownMarket() public {
+        vm.expectRevert(abi.encodeWithSelector(RIKRoyaltySplitter.UnknownMarket.selector, address(numeraire)));
+        splitter.collectPoolFees(address(numeraire));
     }
 
-    /// @dev Two registered assets in one pool cannot be attributed, so it is refused rather than
-    ///      resolved by picking a side.
-    function test_CollectPoolFeesRejectsAmbiguousPool() public {
+    /**
+     * @dev Doppler releases only a beneficiary's share, so a pool pays this contract nothing unless
+     *      it was registered as a beneficiary when the pool was created.
+     */
+    function test_CollectPoolFeesPaysNothingWithoutShares() public {
         MockERC20 otherAsset = new MockERC20("Other", "OTHER");
         _registerRepo(222, OWNER_ID, bob);
+
+        // Launch with the splitter registered, then remove its shares to model a pool it is not a
+        // beneficiary of. The launcher rejects that configuration at launch time; see
+        // `test_RejectsLaunchWhenSplitterIsNotABeneficiary`.
         airlock.setAsset(address(otherAsset));
         vm.prank(bob);
         launcher.launch(222, _params());
+        initializer.setShares(address(otherAsset), address(splitter), 0);
 
-        MockMulticurvePool ambiguous = new MockMulticurvePool(address(asset), address(otherAsset));
-
-        vm.expectRevert(abi.encodeWithSelector(RIKRoyaltySplitter.AmbiguousPool.selector, address(ambiguous)));
-        splitter.collectPoolFees(ambiguous);
-    }
-
-    /// @dev Without the ambiguity check, a pool reporting one token twice would have a single
-    ///      balance delta credited to two buckets.
-    function test_CollectPoolFeesRejectsIdenticalTokens() public {
-        pool.setTokens(address(asset), address(asset));
-
-        vm.expectRevert(abi.encodeWithSelector(RIKRoyaltySplitter.AmbiguousPool.selector, address(pool)));
-        splitter.collectPoolFees(pool);
-    }
-
-    /// @dev Nothing arrived, so nothing is credited and no event is emitted.
-    function test_CollectPoolFeesCreditsNothingWhenPoolPaysNothing() public {
-        SilentMulticurvePool silent = new SilentMulticurvePool(address(asset), address(numeraire));
-
-        vm.recordLogs();
-        (uint256 amount0, uint256 amount1) = splitter.collectPoolFees(silent);
+        _earn(address(otherAsset), 9 ether, 0);
+        (uint256 amount0, uint256 amount1) = splitter.collectPoolFees(address(otherAsset));
 
         assertEq(amount0, 0);
         assertEq(amount1, 0);
-        assertEq(splitter.claimable(REPO_ID, address(asset)), 0);
+        assertEq(splitter.claimable(222, address(otherAsset)), 0);
+    }
+
+    /// @dev A share below WAD is credited proportionally, not in full.
+    function test_CollectPoolFeesCreditsOnlyTheConfiguredShare() public {
+        initializer.setShares(address(asset), address(splitter), 0.25e18);
+        _earn(address(asset), 8 ether, 0);
+
+        (uint256 amount0,) = splitter.collectPoolFees(address(asset));
+
+        assertEq(amount0, 2 ether);
+        assertEq(splitter.claimable(REPO_ID, currency0), 2 ether);
+    }
+
+    /// @dev Nothing arrived, so nothing is credited and no event is emitted.
+    function test_CollectPoolFeesCreditsNothingWhenThePoolPaysNothing() public {
+        vm.recordLogs();
+        (uint256 amount0, uint256 amount1) = splitter.collectPoolFees(address(asset));
+
+        assertEq(amount0, 0);
+        assertEq(amount1, 0);
+        assertEq(splitter.claimable(REPO_ID, currency0), 0);
         assertEq(vm.getRecordedLogs().length, 0);
     }
 
-    /// @dev Credits what arrived, not what was sent.
+    /// @dev A second collection with no new fees pays nothing, because Doppler tracks a
+    ///      per-beneficiary high-water mark rather than a balance.
+    function test_CollectPoolFeesIsIdempotentWithoutNewFees() public {
+        _earn(address(asset), 5 ether, 0);
+        splitter.collectPoolFees(address(asset));
+
+        (uint256 amount0,) = splitter.collectPoolFees(address(asset));
+
+        assertEq(amount0, 0);
+        assertEq(splitter.claimable(REPO_ID, currency0), 5 ether);
+    }
+
+    /// @dev Credits what arrived, not what was reported.
     function test_CollectPoolFeesCreditsOnlyWhatArrived() public {
         FeeOnTransferERC20 taxed = new FeeOnTransferERC20("Taxed", "TAX", 1000); // 10%
-        MockMulticurvePool taxedPool = new MockMulticurvePool(address(asset), address(taxed));
+        _registerRepo(222, OWNER_ID, bob);
 
-        asset.mint(address(taxedPool), 1 ether);
-        taxed.mint(address(taxedPool), 10 ether);
-        taxedPool.setFees(1 ether, 10 ether);
+        airlock.setAsset(address(taxed));
+        vm.prank(bob);
+        launcher.launch(222, _paramsFor(address(numeraire), address(initializer)));
 
-        (, uint256 amount1) = splitter.collectPoolFees(taxedPool);
+        taxed.mint(address(initializer), 10 ether);
+        (address c0,) = _currenciesOf(address(taxed));
+        initializer.accrue(address(taxed), c0 == address(taxed) ? 10 ether : 0, c0 == address(taxed) ? 0 : 10 ether);
 
-        assertEq(amount1, 9 ether);
-        assertEq(splitter.claimable(REPO_ID, address(taxed)), 9 ether);
+        splitter.collectPoolFees(address(taxed));
+
+        assertEq(splitter.claimable(222, address(taxed)), 9 ether);
         assertEq(taxed.balanceOf(address(splitter)), 9 ether);
     }
 
-    /// @dev A pool that takes tokens instead of paying them must revert, not wrap around into an
-    ///      enormous credit that would drain every other repository's bucket.
-    function test_CollectPoolFeesRevertsWhenBalanceShrinks() public {
-        _fundPool(5 ether, 0);
-        splitter.collectPoolFees(pool);
-
-        DrainingMulticurvePool draining = new DrainingMulticurvePool(address(asset), address(numeraire), 1 ether);
-
-        vm.expectRevert(stdError.arithmeticError);
-        splitter.collectPoolFees(draining);
-    }
-
     function test_CollectPoolFeesRejectsReentrancy() public {
-        ReenteringMulticurvePool evil = new ReenteringMulticurvePool(address(asset), address(numeraire), splitter);
+        ReenteringInitializer evil = new ReenteringInitializer();
+        MockERC20 otherAsset = new MockERC20("Other", "OTHER");
+        _registerRepo(222, OWNER_ID, bob);
+
+        airlock.setAsset(address(otherAsset));
+        vm.prank(bob);
+        launcher.launch(222, _paramsFor(address(numeraire), address(evil)));
+        evil.arm(splitter, address(otherAsset));
 
         vm.expectRevert(ReentrancyGuardTransient.ReentrancyGuardReentrantCall.selector);
-        splitter.collectPoolFees(evil);
+        splitter.collectPoolFees(address(otherAsset));
+    }
+
+    /// @dev An initializer that reports a pool but pays nothing is a no-op rather than a failure.
+    function test_CollectPoolFeesToleratesASilentInitializer() public {
+        SilentInitializer silent = new SilentInitializer();
+        MockERC20 otherAsset = new MockERC20("Other", "OTHER");
+        _registerRepo(222, OWNER_ID, bob);
+
+        airlock.setAsset(address(otherAsset));
+        vm.prank(bob);
+        launcher.launch(222, _paramsFor(address(numeraire), address(silent)));
+
+        (uint256 amount0, uint256 amount1) = splitter.collectPoolFees(address(otherAsset));
+        assertEq(amount0, 0);
+        assertEq(amount1, 0);
     }
 
     // --- claiming -----------------------------------------------------------
 
     function test_ClaimPaysTheKeyHolder() public {
-        _fundPool(3 ether, 0);
-        splitter.collectPoolFees(pool);
+        _earn(address(asset), 3 ether, 0);
+        splitter.collectPoolFees(address(asset));
 
         vm.prank(alice);
-        uint256 claimed = splitter.claim(REPO_ID, address(asset), alice);
+        uint256 claimed = splitter.claim(REPO_ID, currency0, alice);
 
         assertEq(claimed, 3 ether);
-        assertEq(asset.balanceOf(alice), 3 ether);
-        assertEq(splitter.claimable(REPO_ID, address(asset)), 0);
+        assertEq(MockERC20(currency0).balanceOf(alice), 3 ether);
+        assertEq(splitter.claimable(REPO_ID, currency0), 0);
     }
 
     function test_ClaimEmitsFeesClaimed() public {
-        _fundPool(3 ether, 0);
-        splitter.collectPoolFees(pool);
+        _earn(address(asset), 3 ether, 0);
+        splitter.collectPoolFees(address(asset));
 
         vm.expectEmit(true, true, true, true);
-        emit RIKRoyaltySplitter.FeesClaimed(REPO_ID, address(asset), bob, 3 ether);
+        emit RIKRoyaltySplitter.FeesClaimed(REPO_ID, currency0, bob, 3 ether);
 
         vm.prank(alice);
-        splitter.claim(REPO_ID, address(asset), bob);
+        splitter.claim(REPO_ID, currency0, bob);
     }
 
     function test_ClaimMayPayAnyRecipient() public {
-        _fundPool(3 ether, 0);
-        splitter.collectPoolFees(pool);
+        _earn(address(asset), 3 ether, 0);
+        splitter.collectPoolFees(address(asset));
 
         vm.prank(alice);
-        splitter.claim(REPO_ID, address(asset), bob);
+        splitter.claim(REPO_ID, currency0, bob);
 
-        assertEq(asset.balanceOf(bob), 3 ether);
-        assertEq(asset.balanceOf(alice), 0);
+        assertEq(MockERC20(currency0).balanceOf(bob), 3 ether);
+        assertEq(MockERC20(currency0).balanceOf(alice), 0);
     }
 
     function test_ClaimRejectsNonHolder() public {
-        _fundPool(3 ether, 0);
-        splitter.collectPoolFees(pool);
+        _earn(address(asset), 3 ether, 0);
+        splitter.collectPoolFees(address(asset));
 
         vm.prank(bob);
         vm.expectRevert(abi.encodeWithSelector(RIKRoyaltySplitter.NotRepositoryKeyHolder.selector, REPO_ID, bob));
-        splitter.claim(REPO_ID, address(asset), bob);
+        splitter.claim(REPO_ID, currency0, bob);
     }
 
-    /// @dev Royalties follow the key, which is why RIK is transferable.
+    /// @dev Royalties follow the key. This is the whole reason RIK is transferable.
     function test_ClaimFollowsTheKeyAfterTransfer() public {
-        _fundPool(3 ether, 0);
-        splitter.collectPoolFees(pool);
+        _earn(address(asset), 3 ether, 0);
+        splitter.collectPoolFees(address(asset));
 
         vm.prank(alice);
         rik.transferFrom(alice, bob, REPO_ID);
 
         vm.prank(alice);
         vm.expectRevert(abi.encodeWithSelector(RIKRoyaltySplitter.NotRepositoryKeyHolder.selector, REPO_ID, alice));
-        splitter.claim(REPO_ID, address(asset), alice);
+        splitter.claim(REPO_ID, currency0, alice);
 
         vm.prank(bob);
-        assertEq(splitter.claim(REPO_ID, address(asset), bob), 3 ether);
+        assertEq(splitter.claim(REPO_ID, currency0, bob), 3 ether);
     }
 
     function test_ClaimRejectsEmptyBucket() public {
         vm.prank(alice);
-        vm.expectRevert(abi.encodeWithSelector(RIKRoyaltySplitter.NothingToClaim.selector, REPO_ID, address(asset)));
-        splitter.claim(REPO_ID, address(asset), alice);
+        vm.expectRevert(abi.encodeWithSelector(RIKRoyaltySplitter.NothingToClaim.selector, REPO_ID, currency0));
+        splitter.claim(REPO_ID, currency0, alice);
     }
 
     function test_ClaimEmptiesTheBucketExactlyOnce() public {
-        _fundPool(3 ether, 0);
-        splitter.collectPoolFees(pool);
+        _earn(address(asset), 3 ether, 0);
+        splitter.collectPoolFees(address(asset));
 
         vm.startPrank(alice);
-        splitter.claim(REPO_ID, address(asset), alice);
-        vm.expectRevert(abi.encodeWithSelector(RIKRoyaltySplitter.NothingToClaim.selector, REPO_ID, address(asset)));
-        splitter.claim(REPO_ID, address(asset), alice);
+        splitter.claim(REPO_ID, currency0, alice);
+        vm.expectRevert(abi.encodeWithSelector(RIKRoyaltySplitter.NothingToClaim.selector, REPO_ID, currency0));
+        splitter.claim(REPO_ID, currency0, alice);
         vm.stopPrank();
     }
 
@@ -312,25 +360,19 @@ contract RIKRoyaltySplitter_T is MarketFixture {
         vm.prank(bob);
         launcher.launch(222, _params());
 
-        MockMulticurvePool otherPool = new MockMulticurvePool(address(otherAsset), address(numeraire));
-        numeraire.mint(address(otherPool), 7 ether);
-        otherPool.setFees(0, 7 ether);
+        _earn(address(asset), 3 ether, 0);
+        _earn(address(otherAsset), 7 ether, 0);
+        splitter.collectPoolFees(address(asset));
+        splitter.collectPoolFees(address(otherAsset));
 
-        _fundPool(0, 3 ether);
-        splitter.collectPoolFees(pool);
-        splitter.collectPoolFees(otherPool);
-
-        assertEq(splitter.claimable(REPO_ID, address(numeraire)), 3 ether);
-        assertEq(splitter.claimable(222, address(numeraire)), 7 ether);
+        (address otherCurrency0,) = _currenciesOf(address(otherAsset));
+        assertGt(splitter.claimable(REPO_ID, currency0), 0);
+        assertGt(splitter.claimable(222, otherCurrency0), 0);
 
         // Bob holds 222 but not REPO_ID.
         vm.prank(bob);
         vm.expectRevert(abi.encodeWithSelector(RIKRoyaltySplitter.NotRepositoryKeyHolder.selector, REPO_ID, bob));
-        splitter.claim(REPO_ID, address(numeraire), bob);
-
-        vm.prank(bob);
-        assertEq(splitter.claim(222, address(numeraire), bob), 7 ether);
-        assertEq(splitter.claimable(REPO_ID, address(numeraire)), 3 ether);
+        splitter.claim(REPO_ID, currency0, bob);
     }
 
     // --- integrator fees ----------------------------------------------------
@@ -368,11 +410,13 @@ contract RIKRoyaltySplitter_T is MarketFixture {
         assertEq(numeraire.balanceOf(bob), 11 ether);
     }
 
-    /// @dev The critical property: the owner's sweep is paid by the Airlock, so it cannot reduce a
-    ///      repository bucket or the balance backing one.
+    /// @dev The owner's sweep is paid by the Airlock, so it cannot reduce a repository bucket or the
+    ///      balance backing one.
     function test_CollectIntegratorFeesCannotTouchRepositoryBuckets() public {
-        _fundPool(0, 3 ether);
-        splitter.collectPoolFees(pool);
+        _earn(address(asset), 0, 3 ether);
+        splitter.collectPoolFees(address(asset));
+        uint256 owed = splitter.claimable(REPO_ID, currency1);
+        assertGt(owed, 0);
 
         numeraire.mint(address(airlock), 11 ether);
         airlock.setFees(address(splitter), address(numeraire), 11 ether);
@@ -380,10 +424,9 @@ contract RIKRoyaltySplitter_T is MarketFixture {
         vm.prank(protocolOwner);
         splitter.collectIntegratorFees(address(numeraire), protocolOwner);
 
-        assertEq(splitter.claimable(REPO_ID, address(numeraire)), 3 ether);
-        assertEq(numeraire.balanceOf(address(splitter)), 3 ether);
+        assertEq(splitter.claimable(REPO_ID, currency1), owed);
 
         vm.prank(alice);
-        assertEq(splitter.claim(REPO_ID, address(numeraire), alice), 3 ether);
+        assertEq(splitter.claim(REPO_ID, currency1, alice), owed);
     }
 }

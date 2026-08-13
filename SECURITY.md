@@ -81,9 +81,33 @@ Everything else slither reports is accepted in place with a `slither-disable-nex
 | `unused-return` | `RIKLauncher._create` | Governance, timelock and migration pool are the Airlock's business; callers read them from its own events. |
 | `incorrect-equality` | `RIKRoyaltySplitter._accrue` | The comparison is against a measured delta, not a balance, and only decides whether to skip a no-op write. |
 | `unused-return` | `RIK._verifyClaims` | The last claim has no successor, so the cursor it returns has nothing to seed. |
+| `unused-return` | `RIKLauncher._splitterIsBeneficiary`, `RIKRoyaltySplitter.collectPoolFees` | Only `poolKey` is read from Doppler's `getState`; the other members of `PoolState` describe the sale rather than the pool's identity. |
 | `dead-code` | `RIK._addressText` | Retained as the readable reference `audienceOf` is fuzzed against. Nothing in `src/` calls it and solc drops it, so the deployed bytecode is byte-for-byte identical with and without it. |
 
 Note that slither builds with `--skip ./test/**`, which leaves the Foundry cache without test artifacts. Run `forge clean` before `forge test` afterwards, or run the two in separate jobs as CI does.
+
+## Doppler integration
+
+The market half depends on contracts this project does not control, and the test suite exercises
+mocks. The following were checked directly against the deployed contracts on Base Mainnet and
+against [Doppler's source](https://github.com/whetstoneresearch/doppler):
+
+| Interface | Checked against | Result |
+| --- | --- | --- |
+| `IAirlock.create` | `0x660eAaEdEBc968f8f3694354FA8EC0b4c5Ba8D12` | selector `0x882db707` present; `CreateParams` field order matches; `integrator` is field 11 |
+| `IAirlock.getIntegratorFees` / `collectIntegratorFees` | as above | selectors `0xe7f0d8f1` and `0x1285e1ce` present; live call returns |
+| `IDopplerHookInitializer.getState` | `DopplerHookInitializer`, `RehypeDopplerHookInitializer` | selector `0x1bab58f5` present; the seven-element tuple decodes against the live contract |
+| `IDopplerHookInitializer.getShares` | as above | selector `0x5ebb58fb` present |
+| `IDopplerHookInitializer.collectFees` | as above | selector `0x817db73b` present; returns `(uint128, uint128)` |
+| Pool id derivation | `Uniswap/v4-core` | `PoolIdLibrary.toId` is `keccak256(abi.encode(poolKey))` over five slots |
+
+Two properties of Doppler's fee model are load-bearing and are covered by tests written against a
+mock that reproduces `FeesManager` rather than approximating it:
+
+- `collectFees` releases only the **caller's** share, so `RIKRoyaltySplitter` must make the call
+  itself and must hold shares. `RIKLauncher` rejects a launch that has not registered it, because
+  beneficiaries are fixed at pool creation and cannot be added afterwards.
+- Releases are ERC20 transfers, so a native numeraire is rejected at launch.
 
 ## Supported versions
 

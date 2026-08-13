@@ -73,6 +73,12 @@ AIRLOCK=$(forge create --rpc-url "$RPC_URL" --private-key "$PRIVATE_KEY" --broad
   --constructor-args "$ASSET" "0x000000000000000000000000000000000000bEEF" \
   | ruby -rjson -e 'puts JSON.parse(STDIN.read)["deployedTo"]')
 
+# Doppler creates the Uniswap V4 pool and stores its fee beneficiaries in the initializer, and the
+# launcher refuses a market that has not registered the splitter as one.
+INITIALIZER=$(forge create --rpc-url "$RPC_URL" --private-key "$PRIVATE_KEY" --broadcast --json \
+  test/mocks/MockDopplerHookInitializer.sol:MockDopplerHookInitializer \
+  | ruby -rjson -e 'puts JSON.parse(STDIN.read)["deployedTo"]')
+
 # The chain guard is what separates a testnet run from a mainnet one, so verify that it refuses
 # rather than assuming it does.
 echo "==> a deploy aimed at the wrong chain is refused"
@@ -154,11 +160,21 @@ echo "==> launching a market"
 cast send "$LAUNCHER" \
   "launch(uint256,(uint256,uint256,address,address,bytes,address,bytes,address,bytes,address,bytes,address,bytes32))" \
   "$REPO_ID" \
-  "(1000000000000000000000000,500000000000000000000000,0x4200000000000000000000000000000000000006,0x0000000000000000000000000000000000070E30,0x1234,0x0000000000000000000000000000000000090C00,0x5678,0x000000000000000000000000000000000000b001,0xabcd,0x0000000000000000000000000000000000111111,0xdcba,0x0000000000000000000000000000000000222222,0x0000000000000000000000000000000000000000000000000000000000000001)" \
+  "(1000000000000000000000000,500000000000000000000000,0x4200000000000000000000000000000000000006,0x0000000000000000000000000000000000070E30,0x1234,0x0000000000000000000000000000000000090C00,0x5678,$INITIALIZER,0xabcd,0x0000000000000000000000000000000000111111,0xdcba,0x0000000000000000000000000000000000222222,0x0000000000000000000000000000000000000000000000000000000000000001)" \
   --rpc-url "$RPC_URL" --private-key "$PRIVATE_KEY" >/dev/null
 
 echo "==> market market show"
 ./bin/market market show "$REPO_ID"
+
+echo "==> the launcher registered the market against the initializer"
+require "$(cast call "$SPLITTER" "initializerOf(address)(address)" "$ASSET" --rpc-url "$RPC_URL")" \
+  "$(cast --to-checksum-address "$INITIALIZER")" "the recorded initializer"
+
+echo "==> the splitter is a beneficiary of the pool it will collect from"
+pool_id="$(cast call "$INITIALIZER" "poolIdOf(address)(bytes32)" "$ASSET" --rpc-url "$RPC_URL")"
+shares="$(cast call "$INITIALIZER" "getShares(bytes32,address)(uint256)" "$pool_id" "$SPLITTER" \
+  --rpc-url "$RPC_URL" | awk '{print $1}')"
+[ "$shares" != "0" ] || fail "the splitter holds no shares in the launched pool"
 
 echo "==> the launcher overrode the caller's integrator"
 # The stand-in Airlock records what it was handed; field 12 of the struct is `integrator`.

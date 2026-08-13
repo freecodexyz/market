@@ -10,18 +10,28 @@ import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import {ReentrancyGuardTransient} from "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
 
 import {IAirlock} from "./IAirlock.sol";
-import {IMulticurvePool} from "./IMulticurvePool.sol";
+import {IDopplerHookInitializer, PoolKey} from "./IDopplerHookInitializer.sol";
 import {IRIKRoyaltySplitter} from "./IRIKRoyaltySplitter.sol";
 
 /**
  * @title RIKRoyaltySplitter
  * @notice Accrues a repository's market fees and pays them to whoever currently holds its {RIK}.
  *
- * @dev # Attribution
+ * @dev # Fee collection
  *
- *      Each accrual must determine which repository earned it. That is derived from the pool: one
- *      side of the pair is a market asset registered by the launcher, and that asset maps to exactly
- *      one repository. A caller cannot name the repository being credited.
+ *      Doppler holds a pool's fees in its initializer and distributes them by share. `collectFees`
+ *      harvests the outstanding amount and releases only the caller's portion, to a beneficiary
+ *      registered when the pool was created. This contract must therefore make the call itself, and
+ *      {RIKLauncher} rejects a launch that has not registered it as a beneficiary.
+ *
+ *      Uniswap V4 is a singleton, so there is no pool contract. A pool is a {PoolKey} and its id is
+ *      the hash of that key; both are read from the initializer using the asset.
+ *
+ *      # Attribution
+ *
+ *      Each accrual must determine which repository earned it. That is the asset, registered by the
+ *      launcher and mapped to exactly one repository. A caller cannot name the repository being
+ *      credited.
  *
  *      The previously deployed splitter exposed `pull(repoId, token)`, which took the repository id
  *      as an argument. Because the Airlock aggregates integrator fees per integrator rather than per
@@ -49,10 +59,19 @@ contract RIKRoyaltySplitter is IRIKRoyaltySplitter, Ownable2Step, ReentrancyGuar
     IAirlock private immutable _airlock;
     address private immutable _launcher;
 
-    mapping(uint256 githubRepoId => mapping(address token => uint256 amount)) private _claimable;
-    mapping(address asset => uint256 githubRepoId) private _repoIdOf;
+    /**
+     * @dev A launched market. `initializer` is recorded rather than accepted per call, so a caller
+     *      cannot point fee collection at a contract of their own choosing.
+     */
+    struct Market {
+        uint256 githubRepoId;
+        address initializer;
+    }
 
-    event MarketRegistered(uint256 indexed githubRepoId, address indexed asset);
+    mapping(uint256 githubRepoId => mapping(address token => uint256 amount)) private _claimable;
+    mapping(address asset => Market market) private _markets;
+
+    event MarketRegistered(uint256 indexed githubRepoId, address indexed asset, address indexed initializer);
     event FeesAccrued(uint256 indexed githubRepoId, address indexed token, uint256 amount);
     event FeesClaimed(uint256 indexed githubRepoId, address indexed token, address indexed to, uint256 amount);
     event IntegratorFeesCollected(address indexed token, address indexed to, uint256 amount);
@@ -64,8 +83,8 @@ contract RIKRoyaltySplitter is IRIKRoyaltySplitter, Ownable2Step, ReentrancyGuar
     error NotRepositoryKeyHolder(uint256 githubRepoId, address account);
     error NothingToClaim(uint256 githubRepoId, address token);
     error NoIntegratorFees(address token);
-    error UnknownPool(address pool);
-    error AmbiguousPool(address pool);
+    error UnknownMarket(address asset);
+    error InvalidInitializer();
     error MarketAlreadyRegistered(address asset, uint256 githubRepoId);
     error InvalidGithubRepoId(uint256 githubRepoId);
 
@@ -111,49 +130,69 @@ contract RIKRoyaltySplitter is IRIKRoyaltySplitter, Ownable2Step, ReentrancyGuar
      *
      * Emits a {MarketRegistered} event.
      */
-    function registerMarket(address asset, uint256 githubRepoId) external virtual onlyLauncher {
-        _registerMarket(asset, githubRepoId);
+    function registerMarket(address asset, address initializer, uint256 githubRepoId) external virtual onlyLauncher {
+        _registerMarket(asset, initializer, githubRepoId);
     }
 
     /**
-     * @dev Collects `pool`'s accrued fees and credits them to the repository that owns it.
+     * @dev Collects the outstanding fees of `asset`'s market and credits them to its repository.
      *
-     * Permissionless. Calling it for another repository confers no benefit on the caller.
+     * Permissionless. Calling it for another repository confers no benefit on the caller, and an
+     * asset the launcher did not register is rejected.
+     *
+     * The pool id is read from the initializer rather than supplied by the caller, and the
+     * initializer is the one recorded at launch, so collection cannot be aimed elsewhere.
      *
      * Requirements:
      *
-     * - Exactly one side of `pool` must be a registered market asset.
+     * - `asset` must be a registered market.
      *
      * Emits a {FeesAccrued} event per token that actually arrived.
      */
-    // Buckets are necessarily credited after the pool is called, because the amount credited is the
-    // difference that call made. `nonReentrant` makes that ordering safe;
+    // Buckets are necessarily credited after the initializer is called, because the amount credited
+    // is the difference that call made. `nonReentrant` makes that ordering safe;
     // `test_CollectPoolFeesRejectsReentrancy` covers it.
     // slither-disable-next-line reentrancy-benign
-    function collectPoolFees(IMulticurvePool pool)
-        external
-        virtual
-        nonReentrant
-        returns (uint256 amount0, uint256 amount1)
-    {
-        address token0 = pool.token0();
-        address token1 = pool.token1();
-        uint256 githubRepoId = _repoIdOfPair(address(pool), token0, token1);
+    function collectPoolFees(address asset) external virtual nonReentrant returns (uint256 amount0, uint256 amount1) {
+        Market memory market = _markets[asset];
+        if (market.githubRepoId == 0) revert UnknownMarket(asset);
+
+        IDopplerHookInitializer initializer = IDopplerHookInitializer(market.initializer);
+        // Only `poolKey` is needed; the remaining members of Doppler's `PoolState` describe the
+        // sale rather than the pool's identity.
+        // slither-disable-next-line unused-return
+        (,,,,, PoolKey memory poolKey,) = initializer.getState(asset);
+
+        address token0 = poolKey.currency0;
+        address token1 = poolKey.currency1;
 
         uint256 before0 = IERC20(token0).balanceOf(address(this));
         uint256 before1 = IERC20(token1).balanceOf(address(this));
 
-        pool.collectFees();
+        // The return value reports what was harvested into the pool's cumulative accounting, which
+        // is not the amount released to this contract, so the balance delta is measured instead.
+        // slither-disable-next-line unused-return
+        initializer.collectFees(poolIdOf(poolKey));
 
-        // Measured rather than taken from the pool's return value, so that a misreporting pool or a
-        // fee-on-transfer token cannot create a claim this contract cannot pay. The subtraction is
-        // left checked: a pool that removed tokens instead of paying them would otherwise underflow
-        // to a very large credit and break solvency for every other repository.
+        // Measured rather than reported, so that a misreporting initializer or a fee-on-transfer
+        // token cannot create a claim this contract cannot pay. The subtraction is left checked: a
+        // call that removed tokens instead of paying them would otherwise underflow to a very large
+        // credit and break solvency for every other repository.
         amount0 = IERC20(token0).balanceOf(address(this)) - before0;
         amount1 = IERC20(token1).balanceOf(address(this)) - before1;
 
-        _accrue(githubRepoId, token0, amount0);
-        _accrue(githubRepoId, token1, amount1);
+        _accrue(market.githubRepoId, token0, amount0);
+        _accrue(market.githubRepoId, token1, amount1);
+    }
+
+    /**
+     * @dev Returns the Uniswap V4 pool id of `poolKey`.
+     *
+     * `PoolIdLibrary.toId` hashes the five words of the struct, which is what `abi.encode` produces
+     * for a {PoolKey} of five static fields.
+     */
+    function poolIdOf(PoolKey memory poolKey) public pure virtual returns (bytes32) {
+        return keccak256(abi.encode(poolKey));
     }
 
     /**
@@ -255,25 +294,35 @@ contract RIKRoyaltySplitter is IRIKRoyaltySplitter, Ownable2Step, ReentrancyGuar
      * @dev Returns the repository `asset` belongs to, or zero when it is not a registered market.
      */
     function repoIdOf(address asset) public view virtual returns (uint256) {
-        return _repoIdOf[asset];
+        return _markets[asset].githubRepoId;
     }
 
     /**
-     * @dev Single mutation choke point for the asset-to-repository mapping.
+     * @dev Returns the Doppler initializer `asset`'s fees are collected from, or the zero address
+     *      when it is not a registered market.
+     */
+    function initializerOf(address asset) public view virtual returns (address) {
+        return _markets[asset].initializer;
+    }
+
+    /**
+     * @dev Single mutation choke point for the market registry.
      *
      * Emits a {MarketRegistered} event.
      */
-    function _registerMarket(address asset, uint256 githubRepoId) internal virtual {
+    function _registerMarket(address asset, address initializer, uint256 githubRepoId) internal virtual {
         if (githubRepoId == 0) revert InvalidGithubRepoId(githubRepoId);
-        // A zero asset would make any pool with the zero address on one side resolve to a
-        // repository. A malfunctioning Airlock could return one to the launcher.
+        // A zero asset would make an unregistered market look registered. A malfunctioning Airlock
+        // could return one to the launcher.
         if (asset == address(0)) revert InvalidAsset();
+        // A zero initializer would make every collection revert, stranding the repository's fees.
+        if (initializer == address(0)) revert InvalidInitializer();
 
-        uint256 existing = _repoIdOf[asset];
+        uint256 existing = _markets[asset].githubRepoId;
         if (existing != 0) revert MarketAlreadyRegistered(asset, existing);
 
-        _repoIdOf[asset] = githubRepoId;
-        emit MarketRegistered(githubRepoId, asset);
+        _markets[asset] = Market({githubRepoId: githubRepoId, initializer: initializer});
+        emit MarketRegistered(githubRepoId, asset, initializer);
     }
 
     /**
@@ -290,23 +339,5 @@ contract RIKRoyaltySplitter is IRIKRoyaltySplitter, Ownable2Step, ReentrancyGuar
 
         _claimable[githubRepoId][token] += amount;
         emit FeesAccrued(githubRepoId, token, amount);
-    }
-
-    /**
-     * @dev Resolves the repository a pool belongs to from its pair.
-     *
-     * Exactly one side must be a registered market asset. Two registered sides cannot be resolved,
-     * and selecting one would credit the wrong repository, so it reverts. This also covers a pool
-     * reporting the same token on both sides, which would otherwise credit a single balance delta
-     * to two buckets.
-     */
-    function _repoIdOfPair(address pool, address token0, address token1) internal view virtual returns (uint256) {
-        uint256 repoId0 = _repoIdOf[token0];
-        uint256 repoId1 = _repoIdOf[token1];
-
-        if (repoId0 != 0 && repoId1 != 0) revert AmbiguousPool(pool);
-        if (repoId0 == 0 && repoId1 == 0) revert UnknownPool(pool);
-
-        return repoId0 == 0 ? repoId1 : repoId0;
     }
 }

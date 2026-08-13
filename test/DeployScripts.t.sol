@@ -116,7 +116,8 @@ contract DeployScripts_T is Test {
         (RIKLauncher launcher, RIKRoyaltySplitter splitter) = new DeployMarket().run();
 
         vm.prank(address(launcher));
-        splitter.registerMarket(address(0xA55E7), 1296269);
+        splitter.registerMarket(address(0xA55E7), address(0x1417), 1296269);
         assertEq(splitter.repoIdOf(address(0xA55E7)), 1296269);
+        assertEq(splitter.initializerOf(address(0xA55E7)), address(0x1417));
     }
 }
