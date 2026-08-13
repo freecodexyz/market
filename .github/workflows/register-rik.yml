@@ -11,11 +11,13 @@ on:
   issues:
     types: [opened]
 
-# `id-token: write` mints the OIDC proof. `issues: write` is only used to report the outcome back.
-# `contents` is deliberately absent: nothing in this job reads this repository.
+# Declaring any permission sets every unlisted one to `none`, so each of these is required.
+# `id-token: write` mints the OIDC proof, `issues: write` reports the outcome back, and
+# `contents: read` is what lets `actions/checkout` fetch the helper scripts this job runs.
 permissions:
   id-token: write
   issues: write
+  contents: read
 
 # Anyone on the internet can open an issue here, so serialise per requester.
 concurrency:
@@ -27,12 +29,13 @@ jobs:
     name: Prove and register
     runs-on: ubuntu-latest
     steps:
-      # Only the helper script is needed. Nothing in this job reads the rest of the repository, and
-      # the checkout is what makes `.github/scripts/app-token.mjs` present on disk.
+      # Only the helper scripts are needed: `decode-jwt.mjs` on every registration, and
+      # `app-token.mjs` when an organisation is proven through the GitHub App.
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
           sparse-checkout: .github/scripts
+          fetch-depth: 1
 
       - name: Parse the request
         id: parse
