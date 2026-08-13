@@ -4,5 +4,6 @@
   "ownerId": "583231",
   "actorId": "583231",
   "wallet": "0x1111111111111111111111111111111111111111",
-  "omitNbf": true
+  "attestationRepoId": "424242",
+  "attestationSlug": "attacker/evil"
 }

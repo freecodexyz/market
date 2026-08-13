@@ -10,6 +10,10 @@ import {Test} from "forge-std/Test.sol";
  * Fixtures are generated rather than committed as blobs so a negative case is a small JSON file
  * instead of a hand-crafted token, and so every payload is a real RSA signature over a realistic
  * GitHub Actions claim set.
+ *
+ * The token is the one an `issues` run in the attestation repository produces: `attestationRepoId`
+ * and `jobWorkflowRef` describe this project, `actorId` is whoever opened the issue, and the
+ * repository being claimed appears only inside `audience`.
  */
 abstract contract OidcFixture is Test {
     struct Fixture {
@@ -22,6 +26,10 @@ abstract contract OidcFixture is Test {
         address wallet;
         uint256 repoId;
         uint256 ownerId;
+        uint256 actorId;
+        uint256 attestationRepoId;
+        string jobWorkflowRef;
+        string audience;
         string eventName;
         uint256 exp;
         uint256 nbf;
@@ -37,18 +45,20 @@ abstract contract OidcFixture is Test {
         f = _runFixture(inputs);
     }
 
-    /// @dev Loads `name`, overriding the repository, owner and audience the token is issued for.
-    function _fixture(string memory name, uint256 repoId, uint256 ownerId, address wallet)
+    /// @dev Loads `name`, overriding the repository being claimed, its owner, the account claiming
+    ///      it, and the wallet the key is bound to.
+    function _fixture(string memory name, uint256 repoId, uint256 ownerId, uint256 actorId, address wallet)
         internal
         returns (Fixture memory f)
     {
-        string[] memory inputs = new string[](6);
+        string[] memory inputs = new string[](7);
         inputs[0] = "node";
         inputs[1] = "test/fixtures/load-fixture.mjs";
         inputs[2] = string.concat("test/fixtures/", name);
         inputs[3] = vm.toString(repoId);
         inputs[4] = vm.toString(ownerId);
-        inputs[5] = vm.toString(wallet);
+        inputs[5] = vm.toString(actorId);
+        inputs[6] = vm.toString(wallet);
 
         f = _runFixture(inputs);
     }
@@ -76,6 +86,10 @@ abstract contract OidcFixture is Test {
         // Carried as strings so an id at the uint64 boundary stays exact; see load-fixture.mjs.
         f.repoId = vm.parseUint(vm.parseJsonString(json, ".repoId"));
         f.ownerId = vm.parseUint(vm.parseJsonString(json, ".ownerId"));
+        f.actorId = vm.parseUint(vm.parseJsonString(json, ".actorId"));
+        f.attestationRepoId = vm.parseUint(vm.parseJsonString(json, ".attestationRepoId"));
+        f.jobWorkflowRef = vm.parseJsonString(json, ".jobWorkflowRef");
+        f.audience = vm.parseJsonString(json, ".audience");
         f.eventName = vm.parseJsonString(json, ".eventName");
         f.exp = vm.parseJsonUint(json, ".exp");
         f.nbf = vm.parseJsonUint(json, ".nbf");

@@ -27,13 +27,15 @@ What the contracts are built to withstand, and what they are not.
 
 - **The GitHub Actions OIDC issuer.** Tokens are taken to be unforgeable and their claims to be set by GitHub, not by the workflow. `repository_id` and `event_name` in particular.
 - **The deployed `GithubOidcVerifier` and the key that owns it.** That key can add an arbitrary signing key and therefore mint trust in a forged JWT for any repository, which makes it the highest-value secret in the system. It lives in the `identity` repository and is not `market`'s to hold. `test_VerifierIsTheRootOfTrust` states this as an executable fact rather than leaving it implied.
+- **The pinned attestation workflow.** `RIK` cannot see GitHub permissions, so `.github/workflows/register-rik.yml` is what decides whether a claimant controls a repository, and the contract believes its answer. It is pinned by `job_workflow_ref`, so changing it requires an owner transaction, and it should be reviewed like contract code. See ATTESTATION.md.
+- **The `RIK` owner.** It can repoint the attestation source at a workflow it controls and therefore mint any repository's key. This is the most powerful role in the system and belongs behind a multisig or a timelock. The deploy script hands ownership over as a two-step transfer and leaves it pending on purpose, so completing it is a deliberate act.
 - **The JSON encoder that produced the payload.** The claim matcher searches for an exact byte run and is only sound because `"` is escaped inside values. `test_UnescapedQuoteInARawPayloadWouldForgeTheEventClaim` shows precisely what breaks without that.
 - **The configured Doppler Airlock.** It is immutable in both the launcher and the splitter, so a malicious one is a deployment error rather than an attack. The launcher still refuses a zero or sentinel asset from it.
 
 ### Assumed hostile
 
 - **Everyone submitting a registration.** `register` is permissionless by design; the proof names its own beneficiary through `aud`.
-- **Every GitHub account that can interact with a repository.** Opening an issue, commenting, forking, watching and opening a pull request all run a workflow in the repository's own context, so they all carry its `repository_id`. Pinning `event_name` to `workflow_dispatch` is what reduces registration to "had write access".
+- **Everyone who opens an issue here.** Registration is deliberately open to the internet. A proof still binds only to the repository the workflow was able to prove, and only to the wallet in the title.
 - **Every wallet a key is minted to.** `_safeMint` hands control to a contract receiver, so a registration can be re-entered exactly there. Re-entering for the same repository is refused; re-entering for another one is legitimate and stays allowed.
 - **Every pool and every token the splitter touches.** Pools may lie, pay nothing, take tokens, or call back in. Accrual is a measured balance delta, subtraction is checked, and the collect path is guarded.
 - **The splitter owner.** It can sweep the Airlock's unattributable integrator fees and nothing else. It cannot reach a repository bucket, and `test_CollectIntegratorFeesCannotTouchRepositoryBuckets` and the system invariants hold it to that.
@@ -42,7 +44,8 @@ What the contracts are built to withstand, and what they are not.
 
 - **The RSA private key in `test/fixtures/load-fixture.mjs`.** Committed on purpose so the JWT fixtures are reproducible. It signs nothing outside this repository's test suite and is not a secret.
 - **Anyone being able to pay for someone else's registration.** That is the point of a permissionless `register`; the proof still binds only to the wallet it names.
-- **A repository owner choosing a wallet they do not control.** The audience is chosen by whoever dispatched the workflow. The contracts cannot know better.
+- **A repository owner choosing a wallet they do not control.** The wallet comes from the issue title, so it is chosen by the claimant through GitHub and is publicly attributable. The contracts cannot know better.
+- **An admin registering a repository to their own wallet rather than the organisation's.** Whoever holds `admin` at the moment of the claim can claim it. That is what `admin` means, and the claimant is recorded on-chain so the decision is auditable.
 - **GitHub itself** — the OIDC issuer, the JWKS endpoint, the Actions platform. Report those to [GitHub's program](https://bounty.github.com).
 
 ## Scope
@@ -50,6 +53,8 @@ What the contracts are built to withstand, and what they are not.
 Covered by this policy:
 
 - `src/RIK.sol`, `src/RIKLauncher.sol`, `src/RIKRoyaltySplitter.sol`, `src/ClaimMatcher.sol` — the contracts authored here
+- `.github/workflows/register-rik.yml` — the attestation workflow pinned on-chain, including anything that lets a claimant be credited with a repository they do not control, changes which wallet or repository a proof ends up naming, or exposes `FCF_REGISTRAR_PRIVATE_KEY` or `FCF_APP_PRIVATE_KEY`
+- `.github/scripts/app-token.mjs` — anything that mints an installation token for a repository the app is not installed on
 - `script/` — anything that misdirects a deployment, in particular the predicted-address wiring between the launcher and the splitter
 - `bin/market` and `tools/` — anything that leaks a key or misdirects an operation
 

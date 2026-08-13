@@ -18,7 +18,10 @@ module Market
       rik
       launcher
       splitter
+      rik_owner
       splitter_owner
+      attestation_repo_id
+      job_workflow_ref
       deployed_at
     ].freeze
 

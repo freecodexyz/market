@@ -25,6 +25,12 @@ PRIVATE_KEY="${PRIVATE_KEY:-0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae
 
 REPO_ID="${REPO_ID:-1296269}"
 OWNER_ID="${OWNER_ID:-583231}"
+ACTOR_ID="${ACTOR_ID:-583231}"
+
+# Must match the defaults baked into test/fixtures/load-fixture.mjs, because the registry pins
+# the attestation source and the fixtures sign proofs that claim to come from it.
+ATTESTATION_REPO_ID="${ATTESTATION_REPO_ID:-900100200}"
+JOB_WORKFLOW_REF="${JOB_WORKFLOW_REF:-freecodexyz/market/.github/workflows/register-rik.yml@refs/heads/main}"
 
 export PRIVATE_KEY
 export NO_COLOR=1
@@ -58,7 +64,9 @@ AIRLOCK=$(forge create --rpc-url "$RPC_URL" --private-key "$PRIVATE_KEY" --broad
   | ruby -rjson -e 'puts JSON.parse(STDIN.read)["deployedTo"]')
 
 echo "==> market deploy"
-./bin/market deploy --rpc-url "$RPC_URL" --verifier "$VERIFIER" --airlock "$AIRLOCK" --splitter-owner "$WALLET"
+./bin/market deploy --rpc-url "$RPC_URL" --verifier "$VERIFIER" --airlock "$AIRLOCK" \
+  --rik-owner "$WALLET" --splitter-owner "$WALLET" \
+  --attestation-repo-id "$ATTESTATION_REPO_ID" --job-workflow-ref "$JOB_WORKFLOW_REF"
 
 RIK=$(ruby -ryaml -e 'puts YAML.safe_load_file(".market.yml")["rik"]')
 LAUNCHER=$(ruby -ryaml -e 'puts YAML.safe_load_file(".market.yml")["launcher"]')
@@ -73,9 +81,13 @@ require "$(cast call "$LAUNCHER" "splitter()(address)" --rpc-url "$RPC_URL")" \
 require "$(cast call "$SPLITTER" "launcher()(address)" --rpc-url "$RPC_URL")" \
   "$(cast --to-checksum-address "$LAUNCHER")" "splitter.launcher()"
 
+echo "==> the registry pins the attestation source"
+require "$(cast call "$RIK" "attestationRepoId()(uint64)" --rpc-url "$RPC_URL" | cut -d' ' -f1)" \
+  "$ATTESTATION_REPO_ID" "the pinned attestation repository"
+
 echo "==> registering $REPO_ID from a real signed proof"
 read -r KID HEADER PAYLOAD SIG MODULUS EXPONENT <<<"$(
-  node test/fixtures/load-fixture.mjs test/fixtures/sample-jwt.json "$REPO_ID" "$OWNER_ID" "$WALLET" \
+  node test/fixtures/load-fixture.mjs test/fixtures/sample-jwt.json "$REPO_ID" "$OWNER_ID" "$ACTOR_ID" "$WALLET" \
     | sed 's/^0x//' | xxd -r -p | ruby -rjson -e '
       f = JSON.parse(STDIN.read)
       hex = ->(s) { "0x" + s.unpack1("H*") }
@@ -85,15 +97,33 @@ read -r KID HEADER PAYLOAD SIG MODULUS EXPONENT <<<"$(
 
 cast send "$VERIFIER" "addKey(bytes32,bytes,bytes)" "$KID" "$MODULUS" "$EXPONENT" \
   --rpc-url "$RPC_URL" --private-key "$PRIVATE_KEY" >/dev/null
-cast send "$RIK" "register(bytes32,bytes,bytes,bytes,uint256,uint256,address)" \
-  "$KID" "$HEADER" "$PAYLOAD" "$SIG" "$REPO_ID" "$OWNER_ID" "$WALLET" \
+cast send "$RIK" "register(bytes32,bytes,bytes,bytes,uint256,uint256,uint256,address)" \
+  "$KID" "$HEADER" "$PAYLOAD" "$SIG" "$REPO_ID" "$OWNER_ID" "$ACTOR_ID" "$WALLET" \
   --rpc-url "$RPC_URL" --private-key "$PRIVATE_KEY" >/dev/null
 
 require "$(cast call "$RIK" "ownerOf(uint256)(address)" "$REPO_ID" --rpc-url "$RPC_URL")" \
   "$WALLET" "the key holder"
 
+echo "==> the contract and the fixture agree on the audience encoding"
+audience="$(cast call "$RIK" "audienceOf(address,uint256,uint256)(string)" \
+  "$WALLET" "$REPO_ID" "$OWNER_ID" --rpc-url "$RPC_URL" | sed 's/^"//; s/"$//')"
+require "$audience" "$(printf '%s:%s:%s' "$(printf '%s' "$WALLET" | tr '[:upper:]' '[:lower:]')" "$REPO_ID" "$OWNER_ID")" \
+  "the audience encoding"
+
+echo "==> the stored record decodes correctly"
+record="$(cast call "$RIK" "repoOf(uint256)((uint64,uint64,uint64,uint64))" "$REPO_ID" --rpc-url "$RPC_URL")"
+# cast annotates large numbers as `1296269 [1.296e6]`, so only the leading token is the value.
+require "$(printf '%s' "$record" | tr -d '()' | cut -d, -f1 | awk '{print $1}')" \
+  "$REPO_ID" "the recorded repository id"
+require "$(printf '%s' "$record" | tr -d '()' | cut -d, -f3 | awk '{print $1}')" \
+  "$ACTOR_ID" "the recorded claimant"
+
 echo "==> market rik show"
-./bin/market rik show "$REPO_ID"
+# Captured rather than piped: `grep -q` closes the pipe on its first match, and under `pipefail`
+# the resulting SIGPIPE would look like a failing command.
+shown="$(./bin/market rik show "$REPO_ID")"
+printf '%s' "$shown" | grep -q "claimed by" || fail "rik show must report the claimant"
+printf '%s\n' "$shown"
 
 echo "==> launching a market"
 cast send "$LAUNCHER" \

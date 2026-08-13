@@ -16,6 +16,7 @@ struct Proof {
     bytes signature;
     uint256 repoId;
     uint256 ownerId;
+    uint256 actorId;
     address wallet;
 }
 
@@ -78,7 +79,7 @@ contract RegistryHandler is Test {
 
         bool already = _rik.isRegistered(p.repoId);
 
-        try _rik.register(p.kid, p.header, p.payload, p.signature, p.repoId, p.ownerId, p.wallet) {
+        try _rik.register(p.kid, p.header, p.payload, p.signature, p.repoId, p.ownerId, p.actorId, p.wallet) {
             if (already) {
                 // A second registration must be impossible; that is what stops a repository owner
                 // taking the key back from someone who bought it.
@@ -101,7 +102,7 @@ contract RegistryHandler is Test {
         repoId = bound(repoId, 1, type(uint64).max);
         if (repoId == p.repoId) return;
 
-        try _rik.register(p.kid, p.header, p.payload, p.signature, repoId, p.ownerId, p.wallet) {
+        try _rik.register(p.kid, p.header, p.payload, p.signature, repoId, p.ownerId, p.actorId, p.wallet) {
             forbiddenRegistrationSucceeded = true;
         } catch {
             rejectedAttempts++;
@@ -115,7 +116,7 @@ contract RegistryHandler is Test {
         address wallet = _actor(walletSeed);
         if (wallet == p.wallet) return;
 
-        try _rik.register(p.kid, p.header, p.payload, p.signature, p.repoId, p.ownerId, wallet) {
+        try _rik.register(p.kid, p.header, p.payload, p.signature, p.repoId, p.ownerId, p.actorId, wallet) {
             forbiddenRegistrationSucceeded = true;
         } catch {
             rejectedAttempts++;
@@ -129,7 +130,7 @@ contract RegistryHandler is Test {
         ownerId = bound(ownerId, 1, type(uint64).max);
         if (ownerId == p.ownerId) return;
 
-        try _rik.register(p.kid, p.header, p.payload, p.signature, p.repoId, ownerId, p.wallet) {
+        try _rik.register(p.kid, p.header, p.payload, p.signature, p.repoId, ownerId, p.actorId, p.wallet) {
             forbiddenRegistrationSucceeded = true;
         } catch {
             rejectedAttempts++;
@@ -165,7 +166,11 @@ contract RegistryHandler is Test {
 }
 
 contract RIKRegistry_Invariant is OidcFixture {
+    uint64 constant ATTESTATION_REPO_ID = 900100200;
+    string constant WORKFLOW_REF = "freecodexyz/market/.github/workflows/register-rik.yml@refs/heads/main";
+
     uint256 constant OWNER_ID = 583231;
+    uint256 constant ACTOR_ID = 583231;
 
     GithubOidcVerifier verifier;
     RIK rik;
@@ -176,14 +181,16 @@ contract RIKRegistry_Invariant is OidcFixture {
 
     function setUp() public {
         verifier = new GithubOidcVerifier(address(this));
-        rik = new RIK(verifier);
+        rik = new RIK(address(this), verifier);
+        rik.setAttestationRepoId(ATTESTATION_REPO_ID);
+        rik.setJobWorkflowRef(WORKFLOW_REF);
 
         uint256[3] memory repoIds = [uint256(1296269), 222333, 987654];
         address[3] memory wallets = [alice, bob, alice];
 
         Proof[] memory proofs = new Proof[](3);
         for (uint256 i = 0; i < 3; ++i) {
-            Fixture memory f = _fixture("sample-jwt.json", repoIds[i], OWNER_ID, wallets[i]);
+            Fixture memory f = _fixture("sample-jwt.json", repoIds[i], OWNER_ID, ACTOR_ID, wallets[i]);
             verifier.addKey(f.kid, f.modulus, f.exponent);
             proofs[i] = Proof({
                 kid: f.kid,
@@ -192,6 +199,7 @@ contract RIKRegistry_Invariant is OidcFixture {
                 signature: f.signature,
                 repoId: repoIds[i],
                 ownerId: OWNER_ID,
+                actorId: ACTOR_ID,
                 wallet: wallets[i]
             });
         }

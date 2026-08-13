@@ -2,11 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0
 pragma solidity ^0.8.24;
 
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {IERC721Errors} from "@openzeppelin/contracts/interfaces/draft-IERC6093.sol";
 import {IERC165} from "@openzeppelin/contracts/interfaces/IERC165.sol";
 import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import {IERC721Metadata} from "@openzeppelin/contracts/token/ERC721/extensions/IERC721Metadata.sol";
 
+import {ClaimMatcher} from "../src/ClaimMatcher.sol";
 import {GithubOidcVerifier} from "../src/GithubOidcVerifier.sol";
 import {JsonClaim} from "../src/JsonClaim.sol";
 import {RIK} from "../src/RIK.sol";
@@ -14,8 +16,13 @@ import {OidcFixture} from "./OidcFixture.sol";
 
 contract RIK_T is OidcFixture {
     /// @dev Must match the defaults baked into `test/fixtures/load-fixture.mjs`.
+    uint64 constant ATTESTATION_REPO_ID = 900100200;
+    string constant WORKFLOW_REF = "freecodexyz/market/.github/workflows/register-rik.yml@refs/heads/main";
+
+    /// @dev The repository being claimed, its owner, and the account opening the issue.
     uint64 constant REPO_ID = 1296269;
     uint64 constant OWNER_ID = 583231;
+    uint64 constant ACTOR_ID = 583231;
 
     GithubOidcVerifier verifier;
     RIK rik;
@@ -28,15 +35,17 @@ contract RIK_T is OidcFixture {
 
     function setUp() public {
         verifier = new GithubOidcVerifier(owner);
-        rik = new RIK(verifier);
+        rik = new RIK(owner, verifier);
+        rik.setAttestationRepoId(ATTESTATION_REPO_ID);
+        rik.setJobWorkflowRef(WORKFLOW_REF);
     }
 
     function _addKey(Fixture memory f) internal {
         verifier.addKey(f.kid, f.modulus, f.exponent);
     }
 
-    function _register(Fixture memory f, uint256 repoId, uint256 ownerId, address wallet) internal {
-        rik.register(f.kid, f.headerB64, f.payloadB64, f.signature, repoId, ownerId, wallet);
+    function _register(Fixture memory f, uint256 repoId, uint256 ownerId, uint256 actorId, address wallet) internal {
+        rik.register(f.kid, f.headerB64, f.payloadB64, f.signature, repoId, ownerId, actorId, wallet);
     }
 
     /// @dev Loads a fixture and installs its signing key.
@@ -45,11 +54,11 @@ contract RIK_T is OidcFixture {
         _addKey(f);
     }
 
-    function _ready(string memory name, uint256 repoId, uint256 ownerId, address wallet)
+    function _ready(string memory name, uint256 repoId, uint256 ownerId, uint256 actorId, address wallet)
         internal
         returns (Fixture memory f)
     {
-        f = _fixture(name, repoId, ownerId, wallet);
+        f = _fixture(name, repoId, ownerId, actorId, wallet);
         _addKey(f);
     }
 
@@ -60,13 +69,30 @@ contract RIK_T is OidcFixture {
         assertEq(rik.symbol(), "RIK");
     }
 
-    /// @dev The single claim that carries proof of write access to the repository.
+    /// @dev The only trigger that runs here while naming an external account as the actor.
     function test_ExpectedEventName() public view {
-        assertEq(rik.expectedEventName(), "workflow_dispatch");
+        assertEq(rik.expectedEventName(), "issues");
     }
 
     function test_JwtVerifierIsImmutable() public view {
         assertEq(address(rik.jwt()), address(verifier));
+    }
+
+    function test_AttestationSourceReads() public view {
+        assertEq(rik.attestationRepoId(), ATTESTATION_REPO_ID);
+        assertEq(rik.jobWorkflowRef(), WORKFLOW_REF);
+    }
+
+    /// @dev The one field a workflow controls, and therefore the whole claim being made.
+    function test_AudienceEncoding() public view {
+        assertEq(rik.audienceOf(alice, REPO_ID, OWNER_ID), "0x1111111111111111111111111111111111111111:1296269:583231");
+    }
+
+    /// @dev The contract and the fixture generator must agree on the encoding exactly, or every
+    ///      registration in this suite would be passing for the wrong reason.
+    function test_AudienceMatchesTheSignedToken() public {
+        Fixture memory f = _fixture("sample-jwt.json");
+        assertEq(rik.audienceOf(alice, REPO_ID, OWNER_ID), f.audience);
     }
 
     function test_TokenIdOfIsIdentity() public view {
@@ -84,10 +110,46 @@ contract RIK_T is OidcFixture {
         assertFalse(rik.supportsInterface(bytes4(0xdeadbeef)));
     }
 
-    /// @dev There is deliberately no administrative surface: key rotation lives in the verifier.
-    function test_HasNoOwnerFunction() public view {
-        (bool ok,) = address(rik).staticcall(abi.encodeWithSignature("owner()"));
-        assertFalse(ok);
+    // --- attestation source authority ---------------------------------------
+
+    function test_SetAttestationRepoIdEmits() public {
+        vm.expectEmit(true, false, false, false);
+        emit RIK.AttestationRepoSet(42);
+        rik.setAttestationRepoId(42);
+
+        assertEq(rik.attestationRepoId(), 42);
+    }
+
+    function test_SetJobWorkflowRefEmits() public {
+        vm.expectEmit(false, false, false, true);
+        emit RIK.JobWorkflowRefSet("owner/repo/.github/workflows/x.yml@refs/heads/main");
+        rik.setJobWorkflowRef("owner/repo/.github/workflows/x.yml@refs/heads/main");
+
+        assertEq(rik.jobWorkflowRef(), "owner/repo/.github/workflows/x.yml@refs/heads/main");
+    }
+
+    function test_SetAttestationRepoIdOnlyOwner() public {
+        vm.prank(stranger);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, stranger));
+        rik.setAttestationRepoId(42);
+    }
+
+    function test_SetJobWorkflowRefOnlyOwner() public {
+        vm.prank(stranger);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, stranger));
+        rik.setJobWorkflowRef("x");
+    }
+
+    /// @dev The attestation source is the most powerful authority in the system, so handing it over
+    ///      cannot be a single mistyped transaction.
+    function test_OwnershipTransferIsTwoStep() public {
+        rik.transferOwnership(stranger);
+        assertEq(rik.owner(), owner);
+        assertEq(rik.pendingOwner(), stranger);
+
+        vm.prank(stranger);
+        rik.acceptOwnership();
+        assertEq(rik.owner(), stranger);
     }
 
     // --- registration happy path -------------------------------------------
@@ -95,20 +157,20 @@ contract RIK_T is OidcFixture {
     function test_RegisterMintsToAttestedWallet() public {
         Fixture memory f = _ready("sample-jwt.json");
 
-        _register(f, REPO_ID, OWNER_ID, alice);
+        _register(f, REPO_ID, OWNER_ID, ACTOR_ID, alice);
 
         assertEq(rik.ownerOf(REPO_ID), alice);
         assertEq(rik.balanceOf(alice), 1);
         assertTrue(rik.isRegistered(REPO_ID));
     }
 
-    /// @dev The proof names its beneficiary, so a relayer can pay the gas without being able to
-    ///      redirect the key.
+    /// @dev The whole point of the model: the repository owner opens an issue and somebody else
+    ///      pays. The proof names its beneficiary, so the relayer cannot redirect the key.
     function test_RegisterIsPermissionless() public {
         Fixture memory f = _ready("sample-jwt.json");
 
         vm.prank(relayer);
-        _register(f, REPO_ID, OWNER_ID, alice);
+        _register(f, REPO_ID, OWNER_ID, ACTOR_ID, alice);
 
         assertEq(rik.ownerOf(REPO_ID), alice);
         assertEq(rik.balanceOf(relayer), 0);
@@ -119,43 +181,49 @@ contract RIK_T is OidcFixture {
 
         vm.warp(1_700_000_000);
         vm.expectEmit(true, true, true, true);
-        emit RIK.RepoRegistered(REPO_ID, alice, relayer, OWNER_ID, 1_700_000_000);
+        emit RIK.RepoRegistered(REPO_ID, alice, relayer, OWNER_ID, ACTOR_ID, 1_700_000_000);
 
         vm.prank(relayer);
-        _register(f, REPO_ID, OWNER_ID, alice);
+        _register(f, REPO_ID, OWNER_ID, ACTOR_ID, alice);
     }
 
     function test_RegisterStoresRepo() public {
         Fixture memory f = _ready("sample-jwt.json");
 
         vm.warp(1_700_000_000);
-        _register(f, REPO_ID, OWNER_ID, alice);
+        _register(f, REPO_ID, OWNER_ID, ACTOR_ID, alice);
 
         RIK.Repo memory repo = rik.repoOf(REPO_ID);
         assertEq(repo.githubRepoId, REPO_ID);
         assertEq(repo.githubOwnerId, OWNER_ID);
+        assertEq(repo.githubActorId, ACTOR_ID);
         assertEq(repo.registeredAt, 1_700_000_000);
     }
 
-    function test_TwoRepositoriesGetDistinctTokens() public {
-        Fixture memory first = _ready("sample-jwt.json", 111, OWNER_ID, alice);
-        Fixture memory second = _fixture("sample-jwt.json", 222, OWNER_ID, bob);
+    /// @dev An organisation repository: the claimant is not the owner, which is exactly the case
+    ///      the workflow has to resolve and the contract simply records.
+    function test_RegisterRecordsAClaimantWhoIsNotTheOwner() public {
+        uint64 orgId = 9919;
+        uint64 memberId = 4242;
+        Fixture memory f = _ready("sample-jwt.json", REPO_ID, orgId, memberId, alice);
 
-        _register(first, 111, OWNER_ID, alice);
-        _register(second, 222, OWNER_ID, bob);
+        _register(f, REPO_ID, orgId, memberId, alice);
+
+        RIK.Repo memory repo = rik.repoOf(REPO_ID);
+        assertEq(repo.githubOwnerId, orgId);
+        assertEq(repo.githubActorId, memberId);
+        assertEq(rik.ownerOf(REPO_ID), alice);
+    }
+
+    function test_TwoRepositoriesGetDistinctTokens() public {
+        Fixture memory first = _ready("sample-jwt.json", 111, OWNER_ID, ACTOR_ID, alice);
+        Fixture memory second = _fixture("sample-jwt.json", 222, OWNER_ID, ACTOR_ID, bob);
+
+        _register(first, 111, OWNER_ID, ACTOR_ID, alice);
+        _register(second, 222, OWNER_ID, ACTOR_ID, bob);
 
         assertEq(rik.ownerOf(111), alice);
         assertEq(rik.ownerOf(222), bob);
-    }
-
-    function test_OneWalletMayHoldSeveralKeys() public {
-        Fixture memory first = _ready("sample-jwt.json", 111, OWNER_ID, alice);
-        Fixture memory second = _fixture("sample-jwt.json", 222, OWNER_ID, alice);
-
-        _register(first, 111, OWNER_ID, alice);
-        _register(second, 222, OWNER_ID, alice);
-
-        assertEq(rik.balanceOf(alice), 2);
     }
 
     function test_IsRegisteredIsFalseBeforeRegistration() public view {
@@ -167,75 +235,127 @@ contract RIK_T is OidcFixture {
         rik.repoOf(REPO_ID);
     }
 
-    // --- claim binding ------------------------------------------------------
+    // --- the audience carries the whole claim -------------------------------
 
-    function test_RejectsAudMismatch() public {
+    /// @dev The proof attests `alice`; nobody can redirect it to another wallet.
+    function test_RejectsWalletMismatch() public {
         Fixture memory f = _ready("sample-jwt.json");
 
-        // The proof attests `alice`; nobody can redirect it to another wallet.
-        vm.expectRevert(abi.encodeWithSelector(JsonClaim.ClaimMismatch.selector, "aud"));
-        _register(f, REPO_ID, OWNER_ID, bob);
+        vm.expectRevert(abi.encodeWithSelector(ClaimMatcher.ClaimMismatch.selector, "aud"));
+        _register(f, REPO_ID, OWNER_ID, ACTOR_ID, bob);
     }
 
-    function test_RejectsRepositoryIdMismatch() public {
+    /// @dev The repository being claimed lives only in the audience, so claiming a different one
+    ///      with the same proof fails there.
+    function test_RejectsRepositoryMismatch() public {
         Fixture memory f = _ready("sample-jwt.json");
 
-        vm.expectRevert(abi.encodeWithSelector(JsonClaim.ClaimMismatch.selector, "repository_id"));
-        _register(f, REPO_ID + 1, OWNER_ID, alice);
+        vm.expectRevert(abi.encodeWithSelector(ClaimMatcher.ClaimMismatch.selector, "aud"));
+        _register(f, REPO_ID + 1, OWNER_ID, ACTOR_ID, alice);
     }
 
-    function test_RejectsRepositoryOwnerIdMismatch() public {
+    function test_RejectsOwnerMismatch() public {
         Fixture memory f = _ready("sample-jwt.json");
 
-        vm.expectRevert(abi.encodeWithSelector(JsonClaim.ClaimMismatch.selector, "repository_owner_id"));
-        _register(f, REPO_ID, OWNER_ID + 1, alice);
+        vm.expectRevert(abi.encodeWithSelector(ClaimMatcher.ClaimMismatch.selector, "aud"));
+        _register(f, REPO_ID, OWNER_ID + 1, ACTOR_ID, alice);
     }
 
-    /// @dev Anyone can open an issue in a repository they do not control, and the resulting run
-    ///      still carries that repository's `repository_id`. Without the event pin this proof would
-    ///      mint the repository's key to a stranger's wallet.
-    function test_RejectsIssuesEvent() public {
-        Fixture memory f = _ready("issues-event-jwt.json");
+    /// @dev A workflow that emitted an audience for a repository it never authorised produces a
+    ///      token this contract cannot be talked into accepting for the real one.
+    function test_RejectsRedirectedAudience() public {
+        Fixture memory f = _ready("redirected-audience-jwt.json");
 
-        vm.expectRevert(abi.encodeWithSelector(JsonClaim.ClaimMismatch.selector, "event_name"));
-        _register(f, REPO_ID, OWNER_ID, alice);
+        vm.expectRevert(abi.encodeWithSelector(ClaimMatcher.ClaimMismatch.selector, "aud"));
+        _register(f, REPO_ID, OWNER_ID, ACTOR_ID, alice);
     }
 
-    /// @dev The same hole through a different trigger.
+    function test_RejectsActorMismatch() public {
+        Fixture memory f = _ready("sample-jwt.json");
+
+        vm.expectRevert(abi.encodeWithSelector(ClaimMatcher.ClaimMismatch.selector, "actor_id"));
+        _register(f, REPO_ID, OWNER_ID, ACTOR_ID + 1, alice);
+    }
+
+    // --- the proof must come from the pinned workflow -----------------------
+
+    /// @dev Without the `repository_id` pin, anyone could invoke the attestation workflow as a
+    ///      reusable workflow from their own repository and choose the audience outright.
+    function test_RejectsForeignAttestationRepository() public {
+        Fixture memory f = _ready("foreign-attestation-repo-jwt.json");
+
+        vm.expectRevert(abi.encodeWithSelector(ClaimMatcher.ClaimMismatch.selector, "repository_id"));
+        _register(f, REPO_ID, OWNER_ID, ACTOR_ID, alice);
+    }
+
+    /// @dev Without the `job_workflow_ref` pin, any other workflow in this repository could mint
+    ///      any repository's key, and rewriting the attestation workflow would be enough.
+    function test_RejectsForeignJobWorkflowRef() public {
+        Fixture memory f = _ready("wrong-workflow-ref-jwt.json");
+
+        vm.expectRevert(abi.encodeWithSelector(ClaimMatcher.ClaimMismatch.selector, "job_workflow_ref"));
+        _register(f, REPO_ID, OWNER_ID, ACTOR_ID, alice);
+    }
+
+    /// @dev Only `issues` runs here while naming an external account as the actor. A
+    ///      `workflow_dispatch` run in this repository is started by somebody with write access to
+    ///      *this* project, which proves nothing about the repository being claimed.
+    function test_RejectsWorkflowDispatchEvent() public {
+        Fixture memory f = _ready("workflow-dispatch-event-jwt.json");
+
+        vm.expectRevert(abi.encodeWithSelector(ClaimMatcher.ClaimMismatch.selector, "event_name"));
+        _register(f, REPO_ID, OWNER_ID, ACTOR_ID, alice);
+    }
+
     function test_RejectsPullRequestEvent() public {
         Fixture memory f = _ready("pull-request-event-jwt.json");
 
-        vm.expectRevert(abi.encodeWithSelector(JsonClaim.ClaimMismatch.selector, "event_name"));
-        _register(f, REPO_ID, OWNER_ID, alice);
+        vm.expectRevert(abi.encodeWithSelector(ClaimMatcher.ClaimMismatch.selector, "event_name"));
+        _register(f, REPO_ID, OWNER_ID, ACTOR_ID, alice);
+    }
+
+    function test_RejectsWhenAttestationRepoUnset() public {
+        RIK fresh = new RIK(owner, verifier);
+        Fixture memory f = _ready("sample-jwt.json");
+
+        vm.expectRevert(RIK.AttestationSourceNotConfigured.selector);
+        fresh.register(f.kid, f.headerB64, f.payloadB64, f.signature, REPO_ID, OWNER_ID, ACTOR_ID, alice);
+    }
+
+    function test_RejectsWhenWorkflowRefUnset() public {
+        RIK fresh = new RIK(owner, verifier);
+        fresh.setAttestationRepoId(ATTESTATION_REPO_ID);
+        Fixture memory f = _ready("sample-jwt.json");
+
+        vm.expectRevert(RIK.AttestationSourceNotConfigured.selector);
+        fresh.register(f.kid, f.headerB64, f.payloadB64, f.signature, REPO_ID, OWNER_ID, ACTOR_ID, alice);
     }
 
     // --- claim injection ----------------------------------------------------
 
-    /// @dev The whole matcher rests on JSON escaping `"` inside values. A workflow name crafted to
-    ///      look like a claim must not be able to forge one.
-    function test_ClaimInjectionCannotForgeRepositoryId() public {
+    /// @dev The whole matcher rests on JSON escaping `"` inside values. Free text crafted to look
+    ///      like a claim must not be able to forge one.
+    function test_ClaimInjectionCannotForgeActorId() public {
         Fixture memory f = _ready("claim-injection-jwt.json");
 
-        // The payload literally contains `pwn","repository_id":"999999"...` inside `workflow`.
-        vm.expectRevert(abi.encodeWithSelector(JsonClaim.ClaimMismatch.selector, "repository_id"));
-        _register(f, 999999, 999999, alice);
+        vm.expectRevert(abi.encodeWithSelector(ClaimMatcher.ClaimMismatch.selector, "actor_id"));
+        _register(f, REPO_ID, OWNER_ID, 999999, alice);
     }
 
     function test_ClaimInjectionStillRegistersRealRepository() public {
         Fixture memory f = _ready("claim-injection-jwt.json");
 
-        // The genuine claims are unaffected by the injected text.
-        _register(f, REPO_ID, OWNER_ID, alice);
+        _register(f, REPO_ID, OWNER_ID, ACTOR_ID, alice);
         assertEq(rik.ownerOf(REPO_ID), alice);
     }
 
-    /// @dev The sharpest version: an attacker who can only fire `issues` tries to smuggle a
-    ///      `workflow_dispatch` event claim in through the workflow name.
+    /// @dev The sharpest version: a stranger can only fire `issues`, so an attacker wanting a
+    ///      different trigger has to try smuggling the event claim in through free text.
     function test_ClaimInjectionCannotForgeEventName() public {
         Fixture memory f = _ready("event-injection-jwt.json");
 
-        vm.expectRevert(abi.encodeWithSelector(JsonClaim.ClaimMismatch.selector, "event_name"));
-        _register(f, REPO_ID, OWNER_ID, alice);
+        vm.expectRevert(abi.encodeWithSelector(ClaimMatcher.ClaimMismatch.selector, "event_name"));
+        _register(f, REPO_ID, OWNER_ID, ACTOR_ID, alice);
     }
 
     // --- verifier delegation ------------------------------------------------
@@ -244,7 +364,7 @@ contract RIK_T is OidcFixture {
         Fixture memory f = _fixture("sample-jwt.json");
 
         vm.expectRevert(abi.encodeWithSelector(GithubOidcVerifier.UnknownKid.selector, f.kid));
-        _register(f, REPO_ID, OWNER_ID, alice);
+        _register(f, REPO_ID, OWNER_ID, ACTOR_ID, alice);
     }
 
     function test_RejectsBadSignature() public {
@@ -252,14 +372,14 @@ contract RIK_T is OidcFixture {
         f.signature[0] = bytes1(uint8(f.signature[0]) ^ 1);
 
         vm.expectRevert(GithubOidcVerifier.BadJwt.selector);
-        _register(f, REPO_ID, OWNER_ID, alice);
+        _register(f, REPO_ID, OWNER_ID, ACTOR_ID, alice);
     }
 
     function test_RejectsWrongIssuer() public {
         Fixture memory f = _ready("wrong-issuer-jwt.json");
 
         vm.expectRevert(abi.encodeWithSelector(JsonClaim.ClaimMismatch.selector, "iss"));
-        _register(f, REPO_ID, OWNER_ID, alice);
+        _register(f, REPO_ID, OWNER_ID, ACTOR_ID, alice);
     }
 
     function test_RejectsExpiredProof() public {
@@ -267,7 +387,7 @@ contract RIK_T is OidcFixture {
 
         vm.warp(f.exp + 1);
         vm.expectRevert(GithubOidcVerifier.TokenExpired.selector);
-        _register(f, REPO_ID, OWNER_ID, alice);
+        _register(f, REPO_ID, OWNER_ID, ACTOR_ID, alice);
     }
 
     function test_RejectsNotYetValidProof() public {
@@ -275,43 +395,42 @@ contract RIK_T is OidcFixture {
 
         vm.warp(f.nbf - 1);
         vm.expectRevert(GithubOidcVerifier.TokenNotYetValid.selector);
-        _register(f, REPO_ID, OWNER_ID, alice);
+        _register(f, REPO_ID, OWNER_ID, ACTOR_ID, alice);
     }
 
     // --- registration is once, forever --------------------------------------
 
     function test_RejectsReplayedProof() public {
         Fixture memory f = _ready("sample-jwt.json");
-        _register(f, REPO_ID, OWNER_ID, alice);
+        _register(f, REPO_ID, OWNER_ID, ACTOR_ID, alice);
 
         vm.expectRevert(abi.encodeWithSelector(RIK.AlreadyRegistered.selector, REPO_ID));
-        _register(f, REPO_ID, OWNER_ID, alice);
+        _register(f, REPO_ID, OWNER_ID, ACTOR_ID, alice);
     }
 
     /// @dev A second, genuinely different proof for the same repository is still refused. This is
     ///      what stops a repository owner yanking the key back from someone who bought it.
     function test_RejectsSecondDistinctProofForSameRepository() public {
         Fixture memory f = _ready("sample-jwt.json");
-        _register(f, REPO_ID, OWNER_ID, alice);
+        _register(f, REPO_ID, OWNER_ID, ACTOR_ID, alice);
 
         Fixture memory second = _ready("sample-jwt-alt.json");
         assertNotEq(keccak256(second.signature), keccak256(f.signature));
 
         vm.expectRevert(abi.encodeWithSelector(RIK.AlreadyRegistered.selector, REPO_ID));
-        _register(second, REPO_ID, OWNER_ID, alice);
+        _register(second, REPO_ID, OWNER_ID, ACTOR_ID, alice);
     }
 
-    /// @dev Even after a transfer, so the buyer cannot be rugged by the repository owner.
     function test_RejectsReRegistrationAfterTransfer() public {
         Fixture memory f = _ready("sample-jwt.json");
-        _register(f, REPO_ID, OWNER_ID, alice);
+        _register(f, REPO_ID, OWNER_ID, ACTOR_ID, alice);
 
         vm.prank(alice);
         rik.transferFrom(alice, bob, REPO_ID);
 
         Fixture memory second = _ready("sample-jwt-alt.json");
         vm.expectRevert(abi.encodeWithSelector(RIK.AlreadyRegistered.selector, REPO_ID));
-        _register(second, REPO_ID, OWNER_ID, alice);
+        _register(second, REPO_ID, OWNER_ID, ACTOR_ID, alice);
 
         assertEq(rik.ownerOf(REPO_ID), bob);
     }
@@ -319,48 +438,55 @@ contract RIK_T is OidcFixture {
     // --- identifier bounds --------------------------------------------------
 
     function test_RejectsZeroRepoId() public {
-        Fixture memory f = _ready("sample-jwt.json", 0, OWNER_ID, alice);
+        Fixture memory f = _ready("sample-jwt.json", 0, OWNER_ID, ACTOR_ID, alice);
 
         vm.expectRevert(abi.encodeWithSelector(RIK.InvalidGithubRepoId.selector, 0));
-        _register(f, 0, OWNER_ID, alice);
+        _register(f, 0, OWNER_ID, ACTOR_ID, alice);
     }
 
     function test_RejectsRepoIdTooLarge() public {
         uint256 repoId = uint256(type(uint64).max) + 1;
-        Fixture memory f = _ready("sample-jwt.json", repoId, OWNER_ID, alice);
+        Fixture memory f = _ready("sample-jwt.json", repoId, OWNER_ID, ACTOR_ID, alice);
 
         vm.expectRevert(abi.encodeWithSelector(RIK.InvalidGithubRepoId.selector, repoId));
-        _register(f, repoId, OWNER_ID, alice);
+        _register(f, repoId, OWNER_ID, ACTOR_ID, alice);
     }
 
     function test_AcceptsRepoIdAtUint64Max() public {
         uint256 repoId = uint256(type(uint64).max);
-        Fixture memory f = _ready("sample-jwt.json", repoId, OWNER_ID, alice);
+        Fixture memory f = _ready("sample-jwt.json", repoId, OWNER_ID, ACTOR_ID, alice);
 
-        _register(f, repoId, OWNER_ID, alice);
+        _register(f, repoId, OWNER_ID, ACTOR_ID, alice);
         assertEq(rik.ownerOf(repoId), alice);
     }
 
     function test_RejectsZeroOwnerId() public {
-        Fixture memory f = _ready("sample-jwt.json", REPO_ID, 0, alice);
+        Fixture memory f = _ready("sample-jwt.json", REPO_ID, 0, ACTOR_ID, alice);
 
         vm.expectRevert(abi.encodeWithSelector(RIK.InvalidGithubOwnerId.selector, 0));
-        _register(f, REPO_ID, 0, alice);
+        _register(f, REPO_ID, 0, ACTOR_ID, alice);
     }
 
-    function test_RejectsOwnerIdTooLarge() public {
-        uint256 ownerId = uint256(type(uint64).max) + 1;
-        Fixture memory f = _ready("sample-jwt.json", REPO_ID, ownerId, alice);
+    function test_RejectsZeroActorId() public {
+        Fixture memory f = _ready("sample-jwt.json", REPO_ID, OWNER_ID, 0, alice);
 
-        vm.expectRevert(abi.encodeWithSelector(RIK.InvalidGithubOwnerId.selector, ownerId));
-        _register(f, REPO_ID, ownerId, alice);
+        vm.expectRevert(abi.encodeWithSelector(RIK.InvalidGithubActorId.selector, 0));
+        _register(f, REPO_ID, OWNER_ID, 0, alice);
+    }
+
+    function test_RejectsActorIdTooLarge() public {
+        uint256 actorId = uint256(type(uint64).max) + 1;
+        Fixture memory f = _ready("sample-jwt.json", REPO_ID, OWNER_ID, actorId, alice);
+
+        vm.expectRevert(abi.encodeWithSelector(RIK.InvalidGithubActorId.selector, actorId));
+        _register(f, REPO_ID, OWNER_ID, actorId, alice);
     }
 
     function test_RejectsZeroWallet() public {
-        Fixture memory f = _ready("sample-jwt.json", REPO_ID, OWNER_ID, address(0));
+        Fixture memory f = _ready("sample-jwt.json", REPO_ID, OWNER_ID, ACTOR_ID, address(0));
 
         vm.expectRevert(abi.encodeWithSelector(IERC721Errors.ERC721InvalidReceiver.selector, address(0)));
-        _register(f, REPO_ID, OWNER_ID, address(0));
+        _register(f, REPO_ID, OWNER_ID, ACTOR_ID, address(0));
     }
 
     // --- transferability ----------------------------------------------------
@@ -369,7 +495,7 @@ contract RIK_T is OidcFixture {
     ///      `UIK`, which is soulbound.
     function test_TransferMovesKey() public {
         Fixture memory f = _ready("sample-jwt.json");
-        _register(f, REPO_ID, OWNER_ID, alice);
+        _register(f, REPO_ID, OWNER_ID, ACTOR_ID, alice);
 
         vm.prank(alice);
         rik.transferFrom(alice, bob, REPO_ID);
@@ -381,7 +507,7 @@ contract RIK_T is OidcFixture {
 
     function test_ApprovedOperatorMayTransfer() public {
         Fixture memory f = _ready("sample-jwt.json");
-        _register(f, REPO_ID, OWNER_ID, alice);
+        _register(f, REPO_ID, OWNER_ID, ACTOR_ID, alice);
 
         vm.prank(alice);
         rik.approve(stranger, REPO_ID);
@@ -395,7 +521,7 @@ contract RIK_T is OidcFixture {
     function test_TransferLeavesRegistrationRecordIntact() public {
         Fixture memory f = _ready("sample-jwt.json");
         vm.warp(1_700_000_000);
-        _register(f, REPO_ID, OWNER_ID, alice);
+        _register(f, REPO_ID, OWNER_ID, ACTOR_ID, alice);
 
         vm.prank(alice);
         rik.transferFrom(alice, bob, REPO_ID);
@@ -403,12 +529,13 @@ contract RIK_T is OidcFixture {
         RIK.Repo memory repo = rik.repoOf(REPO_ID);
         assertEq(repo.githubRepoId, REPO_ID);
         assertEq(repo.githubOwnerId, OWNER_ID);
+        assertEq(repo.githubActorId, ACTOR_ID);
         assertEq(repo.registeredAt, 1_700_000_000);
     }
 
     function test_StrangerCannotTransfer() public {
         Fixture memory f = _ready("sample-jwt.json");
-        _register(f, REPO_ID, OWNER_ID, alice);
+        _register(f, REPO_ID, OWNER_ID, ACTOR_ID, alice);
 
         vm.prank(stranger);
         vm.expectRevert(abi.encodeWithSelector(IERC721Errors.ERC721InsufficientApproval.selector, stranger, REPO_ID));
@@ -419,18 +546,19 @@ contract RIK_T is OidcFixture {
 
     /// forge-config: default.fuzz.runs = 16
     /// forge-config: deep.fuzz.runs = 64
-    function testFuzz_RegisterBindsAnyValidRepository(uint64 repoId, uint64 ownerId, address wallet) public {
-        vm.assume(repoId != 0);
-        vm.assume(ownerId != 0);
+    function testFuzz_RegisterBindsAnyValidRepository(uint64 repoId, uint64 ownerId, uint64 actorId, address wallet)
+        public
+    {
+        vm.assume(repoId != 0 && ownerId != 0 && actorId != 0);
         vm.assume(wallet != address(0));
-        // Precompiles and the test contract itself are poor ERC-721 receivers under `_mint`.
+        // Precompiles and the test contract itself are poor ERC-721 receivers under `_safeMint`.
         vm.assume(uint160(wallet) > 0x0a);
 
-        Fixture memory f = _ready("sample-jwt.json", uint256(repoId), uint256(ownerId), wallet);
-        _register(f, uint256(repoId), uint256(ownerId), wallet);
+        Fixture memory f = _ready("sample-jwt.json", repoId, ownerId, actorId, wallet);
+        _register(f, repoId, ownerId, actorId, wallet);
 
         assertEq(rik.ownerOf(uint256(repoId)), wallet);
-        assertEq(rik.repoOf(uint256(repoId)).githubOwnerId, ownerId);
+        assertEq(rik.repoOf(uint256(repoId)).githubActorId, actorId);
     }
 
     /// forge-config: default.fuzz.runs = 16
@@ -439,8 +567,8 @@ contract RIK_T is OidcFixture {
         Fixture memory f = _ready("sample-jwt.json");
         vm.assume(wallet != alice);
 
-        vm.expectRevert(abi.encodeWithSelector(JsonClaim.ClaimMismatch.selector, "aud"));
-        _register(f, REPO_ID, OWNER_ID, wallet);
+        vm.expectRevert(abi.encodeWithSelector(ClaimMatcher.ClaimMismatch.selector, "aud"));
+        _register(f, REPO_ID, OWNER_ID, ACTOR_ID, wallet);
     }
 
     /// forge-config: default.fuzz.runs = 16
@@ -449,17 +577,17 @@ contract RIK_T is OidcFixture {
         Fixture memory f = _ready("sample-jwt.json");
         vm.assume(repoId != REPO_ID);
 
-        vm.expectRevert(abi.encodeWithSelector(JsonClaim.ClaimMismatch.selector, "repository_id"));
-        _register(f, repoId, OWNER_ID, alice);
+        vm.expectRevert(abi.encodeWithSelector(ClaimMatcher.ClaimMismatch.selector, "aud"));
+        _register(f, repoId, OWNER_ID, ACTOR_ID, alice);
     }
 
     /// forge-config: default.fuzz.runs = 16
     /// forge-config: deep.fuzz.runs = 64
-    function testFuzz_RejectsAnyOwnerButTheAttestedOne(uint256 ownerId) public {
+    function testFuzz_RejectsAnyActorButTheAttestedOne(uint256 actorId) public {
         Fixture memory f = _ready("sample-jwt.json");
-        vm.assume(ownerId != OWNER_ID);
+        vm.assume(actorId != ACTOR_ID);
 
-        vm.expectRevert(abi.encodeWithSelector(JsonClaim.ClaimMismatch.selector, "repository_owner_id"));
-        _register(f, REPO_ID, ownerId, alice);
+        vm.expectRevert(abi.encodeWithSelector(ClaimMatcher.ClaimMismatch.selector, "actor_id"));
+        _register(f, REPO_ID, OWNER_ID, actorId, alice);
     }
 }

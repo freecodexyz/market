@@ -2,6 +2,7 @@
   "kidText": "kid-001",
   "repoId": "1296269",
   "ownerId": "583231",
+  "actorId": "583231",
   "wallet": "0x1111111111111111111111111111111111111111",
-  "workflowName": "pwn\",\"repository_id\":\"999999\",\"repository_owner_id\":\"999999\",\"x\":\"y"
+  "workflowName": "pwn\",\"actor_id\":\"999999\",\"x\":\"y"
 }

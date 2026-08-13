@@ -29,8 +29,13 @@ module Market
         --rpc-url URL              RPC endpoint (deploy; remembered afterwards)
         --verifier ADDRESS         deployed GithubOidcVerifier to trust (deploy)
         --airlock ADDRESS          Doppler Airlock to launch markets through (deploy)
+        --rik-owner ADDRESS        account that controls the attestation source (deploy)
+        --attestation-repo-id ID   pin the attestation repository by hand (deploy)
+        --job-workflow-ref REF     pin the attestation workflow by hand (deploy)
         --splitter-owner ADDRESS   account allowed to sweep integrator fees (deploy)
         --registrar-key KEY        gas-paying key, stored as the registrar secret (configure)
+        --app-id ID                GitHub App id, for the organisation proof path (configure)
+        --app-private-key PEM      GitHub App private key (configure)
         --to ADDRESS               payout recipient (royalty claim)
         --dry-run                  report the plan without writing anything (configure)
         -h, --help                 this message
@@ -41,6 +46,9 @@ module Market
 
       This project does not deploy a verifier. Point --verifier at the one the identity
       repository already runs; its signing keys are mirrored there.
+
+      Repositories are registered by opening an issue here, not from the command line.
+      See ATTESTATION.md.
     TEXT
 
     def initialize(argv, root: Dir.pwd)
@@ -80,8 +88,13 @@ module Market
         o.on("--rpc-url URL") { |value| options[:rpc_url] = value }
         o.on("--verifier ADDRESS") { |value| options[:verifier] = value }
         o.on("--airlock ADDRESS") { |value| options[:airlock] = value }
+        o.on("--rik-owner ADDRESS") { |value| options[:rik_owner] = value }
+        o.on("--attestation-repo-id ID") { |value| options[:attestation_repo_id] = value }
+        o.on("--job-workflow-ref REF") { |value| options[:job_workflow_ref] = value }
         o.on("--splitter-owner ADDRESS") { |value| options[:splitter_owner] = value }
         o.on("--registrar-key KEY") { |value| options[:registrar_key] = value }
+        o.on("--app-id ID") { |value| options[:app_id] = value }
+        o.on("--app-private-key PEM") { |value| options[:app_private_key] = value }
         o.on("--to ADDRESS") { |value| options[:to] = value }
         o.on("--dry-run") { options[:dry_run] = true }
         o.on("-h", "--help") do
@@ -100,12 +113,16 @@ module Market
       when "doctor" then deployment.doctor
       when "deploy"
         deployment.deploy(
-          rpc_url: options[:rpc_url], verifier: options[:verifier],
-          airlock: options[:airlock], splitter_owner: options[:splitter_owner]
+          rpc_url: options[:rpc_url], verifier: options[:verifier], airlock: options[:airlock],
+          splitter_owner: options[:splitter_owner], rik_owner: options[:rik_owner],
+          attestation_repo_id: options[:attestation_repo_id], job_workflow_ref: options[:job_workflow_ref]
         )
       when "status" then deployment.status
       when "configure"
-        deployment.configure(registrar_key: options[:registrar_key], dry_run: options[:dry_run])
+        deployment.configure(
+          registrar_key: options[:registrar_key], app_id: options[:app_id],
+          app_private_key: options[:app_private_key], dry_run: options[:dry_run]
+        )
       when "rik" then rik
       when "market" then market
       when "royalty" then royalty

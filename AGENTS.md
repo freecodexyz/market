@@ -12,6 +12,7 @@ These rules apply to Solidity contracts, libraries, interfaces, scripts, and tes
 
 - Project name: write it as `market` in prose and commands.
 - Purpose: EVM contracts that bind a GitHub repository to a wallet address using a GitHub Actions OIDC proof, and let whoever holds that binding launch a token market for the repository and collect its trading fees.
+- Registration is driven by opening an issue on this repository. The claimant commits nothing to their own repository, installs nothing, and pays no gas; a relayer submits the transaction. ATTESTATION.md is the design record for how that is made sound.
 - Repository shape: a single Foundry project at the repository root.
 - Stack: Foundry, Solidity `^0.8.24`, OpenZeppelin Contracts and `forge-std` as git submodules under `lib/`.
 - Core contract: `RIK`, an ERC-721 "Repository Identity Key" whose token id is the GitHub repository's numeric id.
@@ -57,7 +58,11 @@ These rules apply to Solidity contracts, libraries, interfaces, scripts, and tes
 - `test/*.invariant.t.sol`: stateful campaigns. The registry, the splitter's solvency, and the whole system end to end.
 - `test/RIKSecurity.t.sol`, `test/MarketSecurity.t.sol`: adversarial unit coverage — hostile receivers, verifiers, tokens and Airlocks.
 - `SECURITY.md`: the threat model, what is assumed honest, and the static-analysis triage.
+- `ATTESTATION.md`: how a repository is proven, the options rejected, and what the model costs.
 - `slither.config.json`: what static analysis looks at and which findings are accepted.
+- `.github/workflows/register-rik.yml`: the attestation workflow pinned on-chain by `RIK`.
+- `.github/scripts/app-token.mjs`: mints a GitHub App installation token for the organisation proof path. Optional; without it organisations use the topic challenge.
+- `.github/ISSUE_TEMPLATE/register-repository.md`: the registration entry point.
 - `bin/market`: deployment and operations CLI. Ruby 3.2, standard library only, no bundler.
 - `tools/market/`: its implementation. Deliberately not under `lib/`, which Foundry owns.
 - `smoke-test.sh`: end-to-end exercise of the deploy scripts and the CLI against a local anvil.
@@ -67,9 +72,17 @@ These rules apply to Solidity contracts, libraries, interfaces, scripts, and tes
 ## Architecture Boundaries
 
 - `RIK.tokenIdOf(githubRepoId)` is intentionally identity mapping; the token id is the GitHub repository id. GitHub account ids and repository ids share a numeric range, so never mix the two id spaces in one ERC-721, and never treat a `RIK` id as a `UIK` id.
-- Registration must verify all four claims together: `aud`, `repository_id`, `repository_owner_id`, and `event_name`. Dropping any one of them reintroduces impersonation.
-- `event_name` must equal `workflow_dispatch`. That is the whole proof of control: dispatching a workflow requires write access to the repository. Events such as `issues`, `issue_comment`, `watch`, `fork` and `pull_request` also run in the repository's own context — so they also carry its `repository_id` — while letting any account trigger them. Accepting one of those would let a stranger mint a repository's RIK to their own wallet. This is the one place this implementation deliberately departs from the previously deployed `RIK`.
-- Unlike `UIK`, there is no `job_workflow_ref` pin. The registration workflow lives in the user's own repository, so there is no single reviewed file to pin; `workflow_dispatch` is what carries the authorization instead.
+- Registration is an issue opened on the attestation repository, so the proof is produced by a workflow running *here*. `repository_id` therefore names this project and `actor_id` names whoever opened the issue; neither says anything about the repository being claimed. Read ATTESTATION.md before touching any of this.
+- `aud` is the only claim a workflow controls, so it carries the whole claim: `"<wallet>:<repositoryId>:<ownerId>"`. Everything else exists to prove that string came from reviewed code. `RIK.audienceOf` is the single source of truth for the encoding, and the workflow asks the contract for it rather than rebuilding it, so the two cannot drift apart.
+- Registration must verify all five claims together: `aud`, `actor_id`, `repository_id`, `event_name`, and `job_workflow_ref`. Dropping any one of them reintroduces impersonation.
+- `event_name` must equal `issues`. It is the only trigger that runs in this repository's context while setting `actor_id` to the *external* account that acted, which is what lets somebody prove a repository without this project holding any permission over it. A `workflow_dispatch` run here is started by somebody with write access to *this* project and proves nothing about the repository being claimed.
+- `repository_id` and `job_workflow_ref` pin the attestation source. Without the first, anyone could invoke the workflow as a reusable workflow from their own repository and choose `aud` outright. Without the second, any other workflow here could mint any repository's key.
+- The contract cannot check "does this account control that repository" and must not pretend to. That question is answered in `.github/workflows/register-rik.yml`, which is pinned on-chain and should be reviewed like contract code. The three tiers it uses — repository ownership, a GitHub App confirming `admin`, an admin-only topic challenge — and the options rejected are recorded in ATTESTATION.md.
+- Renaming or moving `register-rik.yml`, or changing its ref, requires an owner transaction on the deployed `RIK`. Treat edits to it as a protocol change.
+- The `RIK` owner can repoint the attestation source and can therefore mint any repository's key. It is the most powerful role in the system, it belongs behind a multisig or a timelock, and the deploy script leaves the handover pending on purpose so somebody has to finish it deliberately.
+- The issue title is untrusted input. Never interpolate `${{ github.event.issue.title }}` into a `run:` block; pass it through `env:` and validate it.
+- `register-rik.yml` simulates with `cast call` before `cast send`. That is what keeps an already-registered repository, an unsynced signing key or an expired token from costing gas, and it is why the registrar key is hard to grief.
+- Any workflow in this repository that opens an issue also triggers `register-rik.yml`. A title that does not parse is classified as `skip`, so it is harmless, but keep it in mind before adding issue-opening automation.
 - Preserve the issuer string exactly: `https://token.actions.githubusercontent.com`. It is checked inside the vendored verifier, not here.
 - `aud` is compared against `Strings.toHexString` of the wallet, so the registration workflow must request a lowercase hex address as the audience.
 - `register` is intentionally permissionless. The proof names its own beneficiary through `aud`, so whoever submits it pays the gas without being able to redirect the identity. Never add an access check that ties the mint to `msg.sender`.

@@ -6,7 +6,19 @@ module Market
   # Using gh rather than the REST API directly means the operator's existing login is the only
   # credential involved, and there is no token for this tool to store or leak.
   class GitHub
-    Repo = Data.define(:slug, :database_id, :owner, :owner_id, :default_branch)
+    # The attestation workflow pinned on-chain. Renaming or moving it is a protocol change: proofs
+    # carry its ref, and the registry compares that ref exactly.
+    WORKFLOW_PATH = ".github/workflows/register-rik.yml"
+
+    Repo = Data.define(:slug, :database_id, :owner, :owner_id, :default_branch) do
+      # The exact `job_workflow_ref` claim the attestation workflow will produce.
+      #
+      # Assembling this by hand is the easiest way to deploy a registry that rejects every proof,
+      # which is why it is derived from the repository rather than typed in.
+      def job_workflow_ref
+        "#{slug}/#{WORKFLOW_PATH}@refs/heads/#{default_branch}"
+      end
+    end
 
     def self.available?
       Shell.available?("gh")

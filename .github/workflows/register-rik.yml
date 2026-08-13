@@ -1,0 +1,250 @@
+name: Register Repository
+
+# `issues` is the only trigger that runs in THIS repository's context while setting `actor_id` to
+# the external account that acted. That is what lets somebody prove a repository they control
+# without committing anything to it, installing anything, or holding any gas.
+#
+# Do not add another trigger. The RIK contract pins `event_name` to `issues`, so tokens minted by
+# any other event are rejected on-chain, and `types: [opened]` keeps the title that was validated
+# here the same title the issue was created with.
+on:
+  issues:
+    types: [opened]
+
+# `id-token: write` mints the OIDC proof. `issues: write` is only used to report the outcome back.
+# `contents` is deliberately absent: nothing in this job reads this repository.
+permissions:
+  id-token: write
+  issues: write
+
+# Anyone on the internet can open an issue here, so serialise per requester.
+concurrency:
+  group: register-rik-${{ github.actor }}
+  cancel-in-progress: false
+
+jobs:
+  register:
+    name: Prove and register
+    runs-on: ubuntu-latest
+    steps:
+      - name: Parse the request
+        id: parse
+        env:
+          # UNTRUSTED INPUT. Read through the environment and never interpolated into the script
+          # body: `${{ github.event.issue.title }}` inside a `run:` block is the standard GitHub
+          # Actions script-injection sink.
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+        run: |
+          set -euo pipefail
+
+          # "<owner>/<repo> <0xwallet>", whitespace-tolerant, case-insensitive on the address.
+          request="$(printf '%s' "$ISSUE_TITLE" | tr -s '[:space:]' ' ' | sed 's/^ //; s/ $//')"
+          slug="$(printf '%s' "$request" | cut -d' ' -f1)"
+          wallet="$(printf '%s' "$request" | cut -d' ' -f2 | tr '[:upper:]' '[:lower:]')"
+
+          if ! printf '%s' "$slug" | grep -Eq '^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$'; then
+            # Not an attempt at a registration; leave ordinary issues alone.
+            echo "status=skip" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # The contract compares `aud` against a lowercase hex address.
+          if ! printf '%s' "$wallet" | grep -Eq '^0x[0-9a-f]{40}$'; then
+            echo "status=invalid" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "status=ok" >> "$GITHUB_OUTPUT"
+          echo "slug=$slug" >> "$GITHUB_OUTPUT"
+          echo "wallet=$wallet" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve the repository
+        id: repo
+        if: steps.parse.outputs.status == 'ok'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SLUG: ${{ steps.parse.outputs.slug }}
+        run: |
+          set -euo pipefail
+
+          # Public metadata only, and the numeric ids are what the contract pins. A slug is
+          # renameable; `id` and `owner.id` are not.
+          if ! data="$(gh api "repos/$SLUG" 2>/dev/null)"; then
+            echo "status=unknown" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "status=ok" >> "$GITHUB_OUTPUT"
+          echo "repo_id=$(printf '%s' "$data" | jq -r '.id')" >> "$GITHUB_OUTPUT"
+          echo "owner_id=$(printf '%s' "$data" | jq -r '.owner.id')" >> "$GITHUB_OUTPUT"
+          echo "owner_type=$(printf '%s' "$data" | jq -r '.owner.type')" >> "$GITHUB_OUTPUT"
+          echo "topics=$(printf '%s' "$data" | jq -c '.topics // []')" >> "$GITHUB_OUTPUT"
+
+      # The whole security question, answered off-chain because the chain cannot see GitHub
+      # permissions. See ATTESTATION.md for why these three tiers and not others.
+      - name: Establish control
+        id: control
+        if: steps.parse.outputs.status == 'ok' && steps.repo.outputs.status == 'ok'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SLUG: ${{ steps.parse.outputs.slug }}
+          WALLET: ${{ steps.parse.outputs.wallet }}
+          REPO_ID: ${{ steps.repo.outputs.repo_id }}
+          OWNER_ID: ${{ steps.repo.outputs.owner_id }}
+          OWNER_TYPE: ${{ steps.repo.outputs.owner_type }}
+          TOPICS: ${{ steps.repo.outputs.topics }}
+          ACTOR: ${{ github.actor }}
+          ACTOR_ID: ${{ github.event.issue.user.id }}
+          APP_ID: ${{ vars.FCF_APP_ID }}
+          APP_PRIVATE_KEY: ${{ secrets.FCF_APP_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+
+          challenge="fcf-$(printf '%s:%s:%s' "$ACTOR_ID" "$REPO_ID" "$WALLET" | sha256sum | cut -c1-20)"
+          echo "challenge=$challenge" >> "$GITHUB_OUTPUT"
+
+          # 1. The repository belongs to the account asking. Public data, nothing to install.
+          if [ "$OWNER_TYPE" = "User" ] && [ "$OWNER_ID" = "$ACTOR_ID" ]; then
+            echo "method=owner" >> "$GITHUB_OUTPUT"
+            echo "status=ok" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # 2. A GitHub App confirms the asker holds `admin`. Needs only `Metadata: read`, and is
+          #    the only tier that works for a private repository.
+          if [ -n "${APP_ID:-}" ] && [ -n "${APP_PRIVATE_KEY:-}" ]; then
+            if token="$(node .github/scripts/app-token.mjs "$SLUG" 2>/dev/null)" && [ -n "$token" ]; then
+              permission="$(GH_TOKEN="$token" gh api "repos/$SLUG/collaborators/$ACTOR/permission" \
+                --jq '.permission' 2>/dev/null || echo "none")"
+              if [ "$permission" = "admin" ]; then
+                echo "method=admin" >> "$GITHUB_OUTPUT"
+                echo "status=ok" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+            fi
+          fi
+
+          # 3. An admin endorsed this exact request in the open. Topics require admin permission to
+          #    set, they are public, and this one commits to the asker and the wallet together.
+          if printf '%s' "$TOPICS" | jq -e --arg t "$challenge" 'index($t) != null' >/dev/null; then
+            echo "method=topic" >> "$GITHUB_OUTPUT"
+            echo "status=ok" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "method=none" >> "$GITHUB_OUTPUT"
+          echo "status=unproven" >> "$GITHUB_OUTPUT"
+
+      - name: Install Foundry
+        if: steps.control.outputs.status == 'ok'
+        uses: foundry-rs/foundry-toolchain@v1
+
+      - name: Mint the proof and register
+        id: register
+        if: steps.control.outputs.status == 'ok'
+        env:
+          RIK_ADDRESS: ${{ vars.FCF_RIK_ADDRESS }}
+          RPC_URL: ${{ vars.FCF_RPC_URL }}
+          REGISTRAR_PRIVATE_KEY: ${{ secrets.FCF_REGISTRAR_PRIVATE_KEY }}
+          WALLET: ${{ steps.parse.outputs.wallet }}
+          REPO_ID: ${{ steps.repo.outputs.repo_id }}
+          OWNER_ID: ${{ steps.repo.outputs.owner_id }}
+          ACTOR_ID: ${{ github.event.issue.user.id }}
+        run: |
+          set -euo pipefail
+
+          # Ask the contract what audience to request, rather than reimplementing the encoding here.
+          # The two cannot drift apart if only one of them defines the format.
+          audience="$(cast call "$RIK_ADDRESS" "audienceOf(address,uint256,uint256)(string)" \
+            "$WALLET" "$REPO_ID" "$OWNER_ID" --rpc-url "$RPC_URL" | sed 's/^"//; s/"$//')"
+          echo "Requesting a token for audience: $audience"
+
+          encoded="$(jq -rn --arg v "$audience" '$v|@uri')"
+          token="$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$encoded" | jq -r '.value')"
+
+          header_b64="$(printf '%s' "$token" | cut -d. -f1)"
+          payload_b64="$(printf '%s' "$token" | cut -d. -f2)"
+          signature_b64="$(printf '%s' "$token" | cut -d. -f3)"
+
+          # The contract addresses keys by keccak of the raw `kid` string; this must stay identical
+          # to how the identity repository's key sync stores them.
+          kid_text="$(printf '%s' "$header_b64" | basenc --base64url -d 2>/dev/null | jq -r '.kid')"
+          kid="$(cast keccak "$kid_text")"
+
+          signature="0x$(printf '%s' "$signature_b64" | basenc --base64url -d 2>/dev/null | xxd -p | tr -d '\n')"
+          header="0x$(printf '%s' "$header_b64" | xxd -p | tr -d '\n')"
+          payload="0x$(printf '%s' "$payload_b64" | xxd -p | tr -d '\n')"
+
+          args=("$kid" "$header" "$payload" "$signature" "$REPO_ID" "$OWNER_ID" "$ACTOR_ID" "$WALLET")
+          signature_abi="register(bytes32,bytes,bytes,bytes,uint256,uint256,uint256,address)"
+
+          # Simulate before spending. This is what keeps an already-registered repository, an
+          # unsynced signing key or an expired token from costing the registrar anything, and it is
+          # why that key is hard to grief.
+          if ! error="$(cast call "$RIK_ADDRESS" "$signature_abi" "${args[@]}" \
+            --from "$(cast wallet address --private-key "$REGISTRAR_PRIVATE_KEY")" \
+            --rpc-url "$RPC_URL" 2>&1)"; then
+            echo "status=rejected" >> "$GITHUB_OUTPUT"
+            {
+              echo "reason<<EOF"
+              printf '%s\n' "$error" | tail -5
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          hash="$(cast send "$RIK_ADDRESS" "$signature_abi" "${args[@]}" \
+            --private-key "$REGISTRAR_PRIVATE_KEY" --rpc-url "$RPC_URL" --json | jq -r '.transactionHash')"
+
+          echo "status=ok" >> "$GITHUB_OUTPUT"
+          echo "tx=$hash" >> "$GITHUB_OUTPUT"
+
+      - name: Report
+        if: always() && steps.parse.outputs.status != 'skip'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE: ${{ github.event.issue.number }}
+          PARSE_STATUS: ${{ steps.parse.outputs.status }}
+          REPO_STATUS: ${{ steps.repo.outputs.status }}
+          CONTROL_STATUS: ${{ steps.control.outputs.status }}
+          CONTROL_METHOD: ${{ steps.control.outputs.method }}
+          CHALLENGE: ${{ steps.control.outputs.challenge }}
+          REGISTER_STATUS: ${{ steps.register.outputs.status }}
+          REGISTER_REASON: ${{ steps.register.outputs.reason }}
+          TX: ${{ steps.register.outputs.tx }}
+          SLUG: ${{ steps.parse.outputs.slug }}
+          WALLET: ${{ steps.parse.outputs.wallet }}
+        run: |
+          set -euo pipefail
+
+          if [ "$PARSE_STATUS" = "invalid" ]; then
+            body="That title did not parse. Use \`<owner>/<repo> <0xwallet>\`, for example \`octocat/Hello-World 0x1111111111111111111111111111111111111111\`."
+          elif [ "$REPO_STATUS" != "ok" ]; then
+            body="Could not read \`$SLUG\`. It has to exist and be public, unless the fcf GitHub App is installed on it."
+          elif [ "$CONTROL_STATUS" != "ok" ]; then
+            body=$(cat <<TEXT
+          Could not establish that you control \`$SLUG\`. Any one of these is enough:
+
+          - **You own it.** Works automatically for a repository owned by your own account.
+          - **Install the fcf GitHub App** on the repository. It asks for \`Metadata: read\` and nothing else, and is the only option for a private repository.
+          - **Add this topic** to the repository, then open a new issue. Topics need admin permission, which is the point, and it can be removed straight afterwards:
+
+          \`\`\`
+          $CHALLENGE
+          \`\`\`
+          TEXT
+          )
+          elif [ "$REGISTER_STATUS" = "rejected" ]; then
+            body=$(printf 'Control confirmed via `%s`, but the chain rejected the registration:\n\n```\n%s\n```' "$CONTROL_METHOD" "$REGISTER_REASON")
+          elif [ "$REGISTER_STATUS" = "ok" ]; then
+            body="Registered \`$SLUG\` to \`$WALLET\`, proven via \`$CONTROL_METHOD\`. Transaction: \`$TX\`"
+          else
+            body="Something went wrong before the registration ran. Check the workflow logs."
+          fi
+
+          gh issue comment "$ISSUE" --body "$body"
+
+          if [ "$REGISTER_STATUS" = "ok" ]; then
+            gh issue close "$ISSUE"
+          fi

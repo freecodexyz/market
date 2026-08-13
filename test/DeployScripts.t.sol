@@ -24,6 +24,10 @@ contract DeployScripts_T is Test {
     address constant VERIFIER = address(0x3731e6a5c0732bf5E9D2fE31bb884A73513be157);
     address constant AIRLOCK = address(0xA141_0c4);
     address constant SPLITTER_OWNER = address(0x0FEE);
+    address constant RIK_OWNER = address(0x5AFE);
+
+    uint64 constant ATTESTATION_REPO_ID = 900100200;
+    string constant WORKFLOW_REF = "freecodexyz/market/.github/workflows/register-rik.yml@refs/heads/main";
 
     address deployer;
 
@@ -32,6 +36,9 @@ contract DeployScripts_T is Test {
         vm.setEnv("PRIVATE_KEY", vm.toString(DEPLOYER_KEY));
         vm.setEnv("JWT_VERIFIER_ADDRESS", vm.toString(VERIFIER));
         vm.setEnv("AIRLOCK_ADDRESS", vm.toString(AIRLOCK));
+        vm.setEnv("RIK_OWNER", vm.toString(RIK_OWNER));
+        vm.setEnv("ATTESTATION_REPO_ID", vm.toString(uint256(ATTESTATION_REPO_ID)));
+        vm.setEnv("JOB_WORKFLOW_REF", WORKFLOW_REF);
     }
 
     function test_DeployRIKPointsAtTheConfiguredVerifier() public {
@@ -40,6 +47,32 @@ contract DeployScripts_T is Test {
         assertEq(address(rik.jwt()), VERIFIER);
         assertEq(rik.name(), "Repository Identity Key");
         assertEq(rik.symbol(), "RIK");
+    }
+
+    /// @dev A registry with no attestation source rejects every proof, so the script has to leave it
+    ///      configured rather than leaving that to a follow-up transaction somebody may forget.
+    function test_DeployRIKPinsTheAttestationSource() public {
+        RIK rik = new DeployRIK().run();
+
+        assertEq(rik.attestationRepoId(), ATTESTATION_REPO_ID);
+        assertEq(rik.jobWorkflowRef(), WORKFLOW_REF);
+    }
+
+    /**
+     * @dev Configuring the attestation source needs ownership, so the deployer holds it during the
+     *      script and hands it over at the end. The handover is two-step, so the deployment finishes
+     *      with ownership *pending*: this pins that the deployer is still in control until the new
+     *      owner accepts, which is the part an operator has to finish.
+     */
+    function test_DeployRIKLeavesOwnershipPendingWithTheConfiguredOwner() public {
+        RIK rik = new DeployRIK().run();
+
+        assertEq(rik.owner(), deployer);
+        assertEq(rik.pendingOwner(), RIK_OWNER);
+
+        vm.prank(RIK_OWNER);
+        rik.acceptOwnership();
+        assertEq(rik.owner(), RIK_OWNER);
     }
 
     /// @dev The point of the whole script: each contract ends up holding the other's real address.

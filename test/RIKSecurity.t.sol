@@ -26,9 +26,13 @@ import {MockERC20} from "./mocks/MockERC20.sol";
  *      reentrancy window `_safeMint` opens.
  */
 contract RIKSecurity_T is OidcFixture {
+    uint64 constant ATTESTATION_REPO_ID = 900100200;
+    string constant WORKFLOW_REF = "freecodexyz/market/.github/workflows/register-rik.yml@refs/heads/main";
+
     uint256 constant REPO_ID = 1296269;
     uint256 constant REPO_ID_B = 222333;
     uint256 constant OWNER_ID = 583231;
+    uint256 constant ACTOR_ID = 583231;
 
     GithubOidcVerifier verifier;
     RIK rik;
@@ -37,30 +41,71 @@ contract RIKSecurity_T is OidcFixture {
 
     function setUp() public {
         verifier = new GithubOidcVerifier(address(this));
-        rik = new RIK(verifier);
+        rik = _configured(verifier);
+    }
+
+    function _configured(IJwtVerifier jwt_) internal returns (RIK registry) {
+        registry = new RIK(address(this), jwt_);
+        registry.setAttestationRepoId(ATTESTATION_REPO_ID);
+        registry.setJobWorkflowRef(WORKFLOW_REF);
     }
 
     function _proofFor(uint256 repoId, address wallet) internal returns (Fixture memory f) {
-        f = _fixture("sample-jwt.json", repoId, OWNER_ID, wallet);
+        f = _fixture("sample-jwt.json", repoId, OWNER_ID, ACTOR_ID, wallet);
         verifier.addKey(f.kid, f.modulus, f.exponent);
     }
 
     function _register(Fixture memory f, uint256 repoId, address wallet) internal {
-        rik.register(f.kid, f.headerB64, f.payloadB64, f.signature, repoId, OWNER_ID, wallet);
+        rik.register(f.kid, f.headerB64, f.payloadB64, f.signature, repoId, OWNER_ID, ACTOR_ID, wallet);
+    }
+
+    /**
+     * @dev Builds a payload the way a JSON encoder would, from parts a hostile verifier controls.
+     *
+     * `freeText` stands in for the workflow name, which GitHub copies into the token verbatim and is
+     * therefore the natural place to attempt claim injection.
+     */
+    function _payload(
+        string memory audience,
+        uint256 actorId,
+        string memory event_,
+        string memory workflowRef,
+        string memory freeText
+    ) internal pure returns (bytes memory) {
+        return abi.encodePacked(
+            '{"workflow":"',
+            freeText,
+            '","aud":"',
+            audience,
+            '","actor_id":"',
+            Strings.toString(actorId),
+            '","repository_id":"',
+            Strings.toString(uint256(ATTESTATION_REPO_ID)),
+            '","event_name":"',
+            event_,
+            '","job_workflow_ref":"',
+            workflowRef,
+            '"}'
+        );
+    }
+
+    /// @dev A payload that satisfies every check, for the cases that are about something else.
+    function _validPayload() internal view returns (bytes memory) {
+        return _payload(rik.audienceOf(alice, REPO_ID, OWNER_ID), ACTOR_ID, "issues", WORKFLOW_REF, "Register");
     }
 
     // --- construction -------------------------------------------------------
 
     function test_ConstructorRejectsZeroVerifier() public {
         vm.expectRevert(RIK.InvalidVerifier.selector);
-        new RIK(IJwtVerifier(address(0)));
+        new RIK(address(this), IJwtVerifier(address(0)));
     }
 
     // --- receiver safety ----------------------------------------------------
 
     /// @dev The key is transferable and carries a repository's royalties. Minting one into a
-    ///      contract that cannot move it would strand the market permanently, and re-running the
-    ///      workflow with a different audience costs nothing.
+    ///      contract that cannot move it would strand the market permanently, and re-opening the
+    ///      issue costs nothing.
     function test_RejectsContractThatCannotReceiveKeys() public {
         MockERC20 notAReceiver = new MockERC20("Not A Wallet", "NAW");
         Fixture memory f = _proofFor(REPO_ID, address(notAReceiver));
@@ -106,7 +151,6 @@ contract RIKSecurity_T is OidcFixture {
         vm.expectRevert(RejectingReceiver.NotToday.selector);
         _register(f, REPO_ID, address(rejecting));
 
-        // And the same repository registers cleanly to a wallet that does work.
         Fixture memory second = _proofFor(REPO_ID, alice);
         _register(second, REPO_ID, alice);
         assertEq(rik.ownerOf(REPO_ID), alice);
@@ -124,7 +168,8 @@ contract RIKSecurity_T is OidcFixture {
         receiver.arm(
             rik,
             abi.encodeCall(
-                RIK.register, (f.kid, f.headerB64, f.payloadB64, f.signature, REPO_ID, OWNER_ID, address(receiver))
+                RIK.register,
+                (f.kid, f.headerB64, f.payloadB64, f.signature, REPO_ID, OWNER_ID, ACTOR_ID, address(receiver))
             )
         );
 
@@ -137,8 +182,8 @@ contract RIKSecurity_T is OidcFixture {
     }
 
     /// @dev Registering a *different* repository from inside the hook is legitimate, and a blanket
-    ///      reentrancy guard would have broken it. A factory minting several keys in one call is
-    ///      the obvious use.
+    ///      reentrancy guard would have broken it. A factory claiming several repositories in one
+    ///      call is the obvious use.
     function test_ReentrantRegistrationOfAnotherRepositorySucceeds() public {
         ReenteringReceiver receiver = new ReenteringReceiver();
         Fixture memory first = _proofFor(REPO_ID, address(receiver));
@@ -155,6 +200,7 @@ contract RIKSecurity_T is OidcFixture {
                     second.signature,
                     REPO_ID_B,
                     OWNER_ID,
+                    ACTOR_ID,
                     address(receiver)
                 )
             )
@@ -175,45 +221,52 @@ contract RIKSecurity_T is OidcFixture {
     ///      any wallet, which is why that key lives in the identity repository and is kept
     ///      dedicated to the sync job.
     function test_VerifierIsTheRootOfTrust() public {
-        bytes memory forged = abi.encodePacked(
-            '{"aud":"',
-            Strings.toHexString(uint160(alice), 20),
-            '","repository_id":"',
-            Strings.toString(REPO_ID),
-            '","repository_owner_id":"',
-            Strings.toString(OWNER_ID),
-            '","event_name":"workflow_dispatch"}'
-        );
-
-        RIK trusting = new RIK(new ScriptedVerifier(forged));
-        trusting.register(bytes32(0), "", "", "", REPO_ID, OWNER_ID, alice);
+        RIK trusting = _configured(new ScriptedVerifier(_validPayload()));
+        trusting.register(bytes32(0), "", "", "", REPO_ID, OWNER_ID, ACTOR_ID, alice);
 
         assertEq(trusting.ownerOf(REPO_ID), alice);
     }
 
     /// @dev Even a trusted verifier's payload still has to carry every claim.
-    function test_ScriptedPayloadStillNeedsTheEventClaim() public {
+    function test_ScriptedPayloadStillNeedsTheWorkflowPin() public {
         bytes memory incomplete = abi.encodePacked(
             '{"aud":"',
-            Strings.toHexString(uint160(alice), 20),
+            rik.audienceOf(alice, REPO_ID, OWNER_ID),
+            '","actor_id":"',
+            Strings.toString(ACTOR_ID),
             '","repository_id":"',
-            Strings.toString(REPO_ID),
-            '","repository_owner_id":"',
-            Strings.toString(OWNER_ID),
-            '"}'
+            Strings.toString(uint256(ATTESTATION_REPO_ID)),
+            '","event_name":"issues"}'
         );
 
-        RIK trusting = new RIK(new ScriptedVerifier(incomplete));
+        RIK trusting = _configured(new ScriptedVerifier(incomplete));
 
-        vm.expectRevert(abi.encodeWithSelector(ClaimMatcher.ClaimMissing.selector, "event_name"));
-        trusting.register(bytes32(0), "", "", "", REPO_ID, OWNER_ID, alice);
+        vm.expectRevert(abi.encodeWithSelector(ClaimMatcher.ClaimMissing.selector, "job_workflow_ref"));
+        trusting.register(bytes32(0), "", "", "", REPO_ID, OWNER_ID, ACTOR_ID, alice);
+    }
+
+    /// @dev A proof produced by some other workflow in this repository is refused, which is what
+    ///      keeps the attestation logic itself pinned.
+    function test_ScriptedPayloadFromAnotherWorkflowIsRejected() public {
+        bytes memory wrongWorkflow = _payload(
+            rik.audienceOf(alice, REPO_ID, OWNER_ID),
+            ACTOR_ID,
+            "issues",
+            "freecodexyz/market/.github/workflows/something-else.yml@refs/heads/main",
+            "Register"
+        );
+
+        RIK trusting = _configured(new ScriptedVerifier(wrongWorkflow));
+
+        vm.expectRevert(abi.encodeWithSelector(ClaimMatcher.ClaimMismatch.selector, "job_workflow_ref"));
+        trusting.register(bytes32(0), "", "", "", REPO_ID, OWNER_ID, ACTOR_ID, alice);
     }
 
     function test_RevertingVerifierPropagates() public {
-        RIK brittle = new RIK(new RevertingVerifier());
+        RIK brittle = _configured(new RevertingVerifier());
 
         vm.expectRevert(RevertingVerifier.Nope.selector);
-        brittle.register(bytes32(0), "", "", "", REPO_ID, OWNER_ID, alice);
+        brittle.register(bytes32(0), "", "", "", REPO_ID, OWNER_ID, ACTOR_ID, alice);
     }
 
     /**
@@ -223,40 +276,15 @@ contract RIKSecurity_T is OidcFixture {
      */
     function test_VerifierCannotWriteStateWhileVerifying() public {
         StateWritingVerifier hostile = new StateWritingVerifier();
-        RIK guarded = new RIK(IJwtVerifier(address(hostile)));
+        RIK guarded = _configured(IJwtVerifier(address(hostile)));
 
         vm.expectRevert();
-        guarded.register(bytes32(0), "", "", "", REPO_ID, OWNER_ID, alice);
+        guarded.register(bytes32(0), "", "", "", REPO_ID, OWNER_ID, ACTOR_ID, alice);
 
         assertEq(hostile.calls(), 0, "the verifier must not have been able to record the call");
     }
 
     // --- the JSON encoding assumption ---------------------------------------
-
-    /// @dev Builds a payload the way a JSON encoder would: no unescaped `"` can appear in a value.
-    function _payload(uint256 repoId, uint256 ownerId, string memory event_) internal view returns (bytes memory) {
-        return abi.encodePacked(
-            '{"workflow":"',
-            event_,
-            '","aud":"',
-            Strings.toHexString(uint160(alice), 20),
-            '","repository_id":"',
-            Strings.toString(repoId),
-            '","repository_owner_id":"',
-            Strings.toString(ownerId),
-            '","event_name":"',
-            event_,
-            '"}'
-        );
-    }
-
-    function _containsQuote(string memory value) internal pure returns (bool) {
-        bytes memory raw = bytes(value);
-        for (uint256 i = 0; i < raw.length; ++i) {
-            if (raw[i] == '"') return true;
-        }
-        return false;
-    }
 
     /**
      * @dev The assumption the whole matcher rests on, stated as an executable fact.
@@ -267,47 +295,77 @@ contract RIKSecurity_T is OidcFixture {
      * and why {ClaimMatcher} must never be changed to match anything looser than an exact byte run.
      */
     function test_UnescapedQuoteInARawPayloadWouldForgeTheEventClaim() public {
-        // `workflow` is attacker-controlled free text. Unescaped, it closes its own string and
-        // writes a second `event_name` claim.
-        string memory injected = '","event_name":"workflow_dispatch';
+        // The workflow name is attacker-controlled. Unescaped, it closes its own string and writes
+        // a second `event_name` claim.
+        string memory injected = '","event_name":"issues';
 
-        RIK trusting = new RIK(new ScriptedVerifier(_payload(REPO_ID, OWNER_ID, injected)));
-        trusting.register(bytes32(0), "", "", "", REPO_ID, OWNER_ID, alice);
+        RIK trusting = _configured(
+            new ScriptedVerifier(
+                _payload(rik.audienceOf(alice, REPO_ID, OWNER_ID), ACTOR_ID, "push", WORKFLOW_REF, injected)
+            )
+        );
+        trusting.register(bytes32(0), "", "", "", REPO_ID, OWNER_ID, ACTOR_ID, alice);
 
         assertEq(trusting.ownerOf(REPO_ID), alice);
+    }
+
+    function _containsQuote(string memory value) internal pure returns (bool) {
+        bytes memory raw = bytes(value);
+        for (uint256 i = 0; i < raw.length; ++i) {
+            if (raw[i] == '"') return true;
+        }
+        return false;
     }
 
     // --- fuzz ---------------------------------------------------------------
 
     /**
-     * @dev No payload whose `event_name` is anything but `workflow_dispatch` ever registers.
+     * @dev No payload whose `event_name` is anything but `issues` ever registers.
      *
      * Values are constrained to be quote-free, which is what a JSON encoder guarantees and what
-     * {test_UnescapedQuoteInARawPayloadWouldForgeTheEventClaim} shows is load-bearing. Within that
-     * assumption, no event name gets through, however it is shaped.
+     * {test_UnescapedQuoteInARawPayloadWouldForgeTheEventClaim} shows is load-bearing.
      */
     /// forge-config: default.fuzz.runs = 512
     /// forge-config: deep.fuzz.runs = 10000
-    function testFuzz_OnlyWorkflowDispatchEverRegisters(uint64 repoId, uint64 ownerId, string calldata event_) public {
-        vm.assume(repoId != 0 && ownerId != 0);
-        vm.assume(keccak256(bytes(event_)) != keccak256("workflow_dispatch"));
+    function testFuzz_OnlyIssuesEverRegisters(string calldata event_) public {
+        vm.assume(keccak256(bytes(event_)) != keccak256("issues"));
         vm.assume(!_containsQuote(event_));
 
-        RIK trusting = new RIK(new ScriptedVerifier(_payload(uint256(repoId), uint256(ownerId), event_)));
+        RIK trusting = _configured(
+            new ScriptedVerifier(
+                _payload(rik.audienceOf(alice, REPO_ID, OWNER_ID), ACTOR_ID, event_, WORKFLOW_REF, "Register")
+            )
+        );
 
-        vm.expectRevert();
-        trusting.register(bytes32(0), "", "", "", uint256(repoId), uint256(ownerId), alice);
+        vm.expectRevert(abi.encodeWithSelector(ClaimMatcher.ClaimMismatch.selector, "event_name"));
+        trusting.register(bytes32(0), "", "", "", REPO_ID, OWNER_ID, ACTOR_ID, alice);
     }
 
-    /// @dev And the audience is likewise unforgeable: no wallet but the attested one is ever bound.
+    /// @dev The audience is the whole claim, so no triple but the attested one is ever bound.
     /// forge-config: default.fuzz.runs = 512
     /// forge-config: deep.fuzz.runs = 10000
-    function testFuzz_OnlyTheAttestedWalletEverRegisters(address wallet) public {
-        vm.assume(wallet != alice);
+    function testFuzz_OnlyTheAttestedTripleEverRegisters(address wallet, uint64 repoId, uint64 ownerId) public {
+        vm.assume(repoId != 0 && ownerId != 0);
+        vm.assume(
+            keccak256(bytes(rik.audienceOf(wallet, repoId, ownerId)))
+                != keccak256(bytes(rik.audienceOf(alice, REPO_ID, OWNER_ID)))
+        );
 
-        RIK trusting = new RIK(new ScriptedVerifier(_payload(REPO_ID, OWNER_ID, "workflow_dispatch")));
+        RIK trusting = _configured(new ScriptedVerifier(_validPayload()));
 
         vm.expectRevert(abi.encodeWithSelector(ClaimMatcher.ClaimMismatch.selector, "aud"));
-        trusting.register(bytes32(0), "", "", "", REPO_ID, OWNER_ID, wallet);
+        trusting.register(bytes32(0), "", "", "", repoId, ownerId, ACTOR_ID, wallet);
+    }
+
+    /// @dev And no actor but the one GitHub named is ever credited.
+    /// forge-config: default.fuzz.runs = 512
+    /// forge-config: deep.fuzz.runs = 10000
+    function testFuzz_OnlyTheAttestedActorEverRegisters(uint64 actorId) public {
+        vm.assume(actorId != 0 && uint256(actorId) != ACTOR_ID);
+
+        RIK trusting = _configured(new ScriptedVerifier(_validPayload()));
+
+        vm.expectRevert(abi.encodeWithSelector(ClaimMatcher.ClaimMismatch.selector, "actor_id"));
+        trusting.register(bytes32(0), "", "", "", REPO_ID, OWNER_ID, actorId, alice);
     }
 }

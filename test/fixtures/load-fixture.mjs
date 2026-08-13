@@ -4,7 +4,12 @@
 // `vm.ffi`, it signs a realistic token payload with a throwaway RSA key and prints the pieces the
 // contracts need, hex-encoded so `vm.ffi` returns them as bytes.
 //
-// Usage: node test/fixtures/load-fixture.mjs <fixture.json> [repoId] [ownerId] [wallet]
+// Usage: node test/fixtures/load-fixture.mjs <fixture.json> [repoId] [ownerId] [actorId] [wallet]
+//
+// The token is the one an `issues` run in the *attestation* repository produces, so `repository_id`
+// and `job_workflow_ref` describe this project and `actor_id` is whoever opened the issue. The
+// repository being claimed appears only in `aud`, which is the single field a workflow controls.
+// See ATTESTATION.md.
 //
 // Every field of the payload is driven by the fixture file so negative cases stay data rather than
 // code. See test/fixtures/*.json.
@@ -44,7 +49,14 @@ nKG27ed/zJnymS277DA7Jcc=
 -----END PRIVATE KEY-----`;
 
 const DEFAULT_ISS = "https://token.actions.githubusercontent.com";
-const DEFAULT_SLUG = "octocat/Hello-World";
+
+// The attestation repository: where the issue is opened and where the workflow runs. This is what
+// `repository_id` and `job_workflow_ref` describe, and it has nothing to do with the repository
+// being claimed.
+const ATTESTATION_SLUG = "freecodexyz/market";
+const ATTESTATION_REPO_ID = "900100200";
+const ATTESTATION_OWNER_ID = "700800900";
+const ATTESTATION_WORKFLOW = ".github/workflows/register-rik.yml";
 
 function b64url(value) {
   return Buffer.from(JSON.stringify(value)).toString("base64url");
@@ -60,27 +72,35 @@ function bytes32Ascii(value) {
 
 const fixture = JSON.parse(readFileSync(process.argv[2], "utf8"));
 
+// The repository being claimed, its owner, and the account claiming it.
 const repoId = String(process.argv[3] ?? fixture.repoId);
 const ownerId = String(process.argv[4] ?? fixture.ownerId);
-const wallet = String(process.argv[5] ?? fixture.wallet).toLowerCase();
+const actorId = String(process.argv[5] ?? fixture.actorId);
+const wallet = String(process.argv[6] ?? fixture.wallet).toLowerCase();
 
 const iss = fixture.iss ?? DEFAULT_ISS;
 const exp = fixture.exp ?? 4102444800;
 const nbf = fixture.nbf ?? 0;
-// `workflow_dispatch` is the only trigger that requires write access to the repository, which is
-// what RIK reduces its whole proof of control to.
-const eventName = fixture.eventName ?? "workflow_dispatch";
-const slug = fixture.slug ?? DEFAULT_SLUG;
-const jobWorkflowRef = fixture.jobWorkflowRef ?? `${slug}/.github/workflows/register-rik.yml@refs/heads/main`;
+// `issues` is the only trigger that runs in the attestation repository's context while naming an
+// external account as the actor.
+const eventName = fixture.eventName ?? "issues";
+const attestationSlug = fixture.attestationSlug ?? ATTESTATION_SLUG;
+const attestationRepoId = String(fixture.attestationRepoId ?? ATTESTATION_REPO_ID);
+const attestationOwnerId = String(fixture.attestationOwnerId ?? ATTESTATION_OWNER_ID);
+const jobWorkflowRef = fixture.jobWorkflowRef ?? `${attestationSlug}/${ATTESTATION_WORKFLOW}@refs/heads/main`;
 const kidText = fixture.kidText ?? "kid-001";
 const kid = fixture.kid ?? bytes32Ascii(kidText);
 // Distinguishes two tokens carrying identical claims, so a test can prove a second valid proof is
 // still rejected rather than merely a replayed one.
 const jti = fixture.jti ?? "00000000-0000-0000-0000-000000000000";
 
-// Attacker-controlled free text. GitHub copies the workflow name into the token verbatim, so this
-// is the natural place to attempt claim injection. A JSON encoder escapes the quotes, which is
-// exactly what the JsonClaim matcher relies on.
+// The single field the workflow controls, and therefore the whole claim being made. Overridable so
+// a fixture can attempt a malformed or redirected audience.
+const audience = fixture.aud ?? `${wallet}:${repoId}:${ownerId}`;
+
+// Attacker-controlled free text. GitHub copies the issue-derived workflow name into the token
+// verbatim, so this is the natural place to attempt claim injection. A JSON encoder escapes the
+// quotes, which is exactly what the claim matcher relies on.
 const workflowName = fixture.workflowName ?? "Register Repository";
 
 const privateKey = createPrivateKey(TEST_RSA_PRIVATE_KEY);
@@ -88,24 +108,23 @@ const publicJwk = createPublicKey(privateKey).export({ format: "jwk" });
 
 const headerB64 = b64url({ alg: "RS256", typ: "JWT", kid: kidText });
 
-// Mirrors the claim set and ordering of a real GitHub Actions OIDC token for a `workflow_dispatch`
-// run.
+// Mirrors the claim set and ordering of a real GitHub Actions OIDC token for an `issues` run.
 const payload = {
   jti,
-  sub: `repo:${slug}:ref:refs/heads/main`,
-  aud: wallet,
+  sub: `repo:${attestationSlug}:ref:refs/heads/main`,
+  aud: audience,
   ref: "refs/heads/main",
   sha: "0000000000000000000000000000000000000000",
-  repository: slug,
-  repository_owner: slug.split("/")[0],
-  repository_owner_id: ownerId,
+  repository: attestationSlug,
+  repository_owner: attestationSlug.split("/")[0],
+  repository_owner_id: attestationOwnerId,
   run_id: "1",
   run_number: "1",
   run_attempt: "1",
   repository_visibility: "public",
-  repository_id: repoId,
-  actor_id: ownerId,
-  actor: slug.split("/")[0],
+  repository_id: attestationRepoId,
+  actor_id: actorId,
+  actor: fixture.actor ?? "octocat",
   workflow: workflowName,
   head_ref: "",
   base_ref: "",
@@ -133,12 +152,15 @@ const output = JSON.stringify({
   exponent: b64urlToHex(publicJwk.e),
   wallet,
   iss,
-  // Emitted as decimal strings rather than JSON numbers: a repository id at the uint64 boundary
-  // does not survive a round trip through a double.
+  // Emitted as decimal strings rather than JSON numbers: an id at the uint64 boundary does not
+  // survive a round trip through a double.
   repoId,
   ownerId,
-  eventName,
+  actorId,
+  attestationRepoId,
   jobWorkflowRef,
+  audience,
+  eventName,
   exp,
   nbf,
 });

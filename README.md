@@ -20,20 +20,37 @@ the [`identity`](../identity) repository's deployed sources. This project does *
 verifier; it points `RIK` at the live one, which is where GitHub's rotating signing keys are already
 mirrored. They are vendored here so the test suite can run a verifier locally.
 
+## Registering a repository
+
+Open an issue here, titled with the repository and the wallet that should hold its key:
+
+```
+octocat/Hello-World 0x1111111111111111111111111111111111111111
+```
+
+That is the whole flow. You commit nothing to your own repository, install nothing, and need no ETH:
+a workflow here checks that you control the repository, requests a signed proof from GitHub, and a
+relayer pays for the transaction. The result is posted back as a comment.
+
 ## Proof model
 
-A GitHub Actions OIDC token is signed by GitHub and cannot be forged, and GitHub sets
-`repository_id` from the repository the workflow actually ran in. But any workflow running in a
-repository may ask for any `aud`, so the security of the scheme reduces to one question: **who was
-allowed to start that run?**
+Attestation happens in *this* repository, so the OIDC token's `repository_id` names this project and
+`actor_id` names whoever opened the issue. Neither says anything about the repository being claimed.
 
-`RIK` answers it with `event_name`, which must be `workflow_dispatch` — the only trigger that
-requires write access to the repository. `issues`, `issue_comment`, `watch`, `fork` and
-`pull_request` all run in the repository's own context too, and any account can fire them; accepting
-one of those would let a stranger mint a repository's key to their own wallet.
+Every claim in an Actions OIDC token is set by GitHub except one: **`aud` is an arbitrary string
+chosen by the workflow**. It is therefore the only channel a reviewed workflow has to speak to the
+chain, and it carries the whole claim — `"<wallet>:<repositoryId>:<ownerId>"`. The other four checks
+exist to prove that string came from reviewed code: `repository_id` and `job_workflow_ref` pin the
+attestation source, `event_name` pins the `issues` trigger, and `actor_id` names the account being
+credited. Dropping any one of the five reintroduces impersonation, and every one has a negative test
+that says so.
 
-Registration then pins `repository_id`, `repository_owner_id` and `aud`. Dropping any one of the
-four checks reintroduces impersonation, and every one has a negative test that says so.
+The contract cannot check "does this account control that repository", and does not try. The
+workflow does, in three tiers: **you own it** (public data, automatic), **a GitHub App confirms you
+hold `admin`** (one `Metadata: read` permission, and the only tier that works for private
+repositories), or **an admin adds a one-off challenge topic** (topics require admin, and it can be
+removed straight afterwards). [ATTESTATION.md](ATTESTATION.md) is the design record: why these
+three, what was rejected, and what the model costs.
 
 `register` is permissionless: the proof names its own beneficiary through `aud`, so a relayer can
 pay the gas without being able to redirect the key.

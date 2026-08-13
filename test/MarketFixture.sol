@@ -24,6 +24,9 @@ import {OidcFixture} from "./OidcFixture.sol";
  */
 abstract contract MarketFixture is OidcFixture {
     /// @dev Must match the defaults baked into `test/fixtures/load-fixture.mjs`.
+    uint64 constant ATTESTATION_REPO_ID = 900100200;
+    string constant WORKFLOW_REF = "freecodexyz/market/.github/workflows/register-rik.yml@refs/heads/main";
+
     uint256 constant REPO_ID = 1296269;
     uint256 constant OWNER_ID = 583231;
 
@@ -47,7 +50,9 @@ abstract contract MarketFixture is OidcFixture {
 
     function _deployMarket() internal {
         verifier = new GithubOidcVerifier(address(this));
-        rik = new RIK(verifier);
+        rik = new RIK(address(this), verifier);
+        rik.setAttestationRepoId(ATTESTATION_REPO_ID);
+        rik.setJobWorkflowRef(WORKFLOW_REF);
 
         asset = new MockERC20("Repository Token", "REPO");
         numeraire = new MockERC20("Wrapped Ether", "WETH");
@@ -65,10 +70,13 @@ abstract contract MarketFixture is OidcFixture {
     }
 
     /// @dev Mints a repository's key to `wallet` through a real OIDC proof.
+    ///
+    ///      The market half does not care who claimed a repository, only who holds its key, so the
+    ///      claimant is just the owner here. `RIK.t.sol` is where the two are pulled apart.
     function _registerRepo(uint256 repoId, uint256 ownerId, address wallet) internal {
-        Fixture memory f = _fixture("sample-jwt.json", repoId, ownerId, wallet);
+        Fixture memory f = _fixture("sample-jwt.json", repoId, ownerId, ownerId, wallet);
         verifier.addKey(f.kid, f.modulus, f.exponent);
-        rik.register(f.kid, f.headerB64, f.payloadB64, f.signature, repoId, ownerId, wallet);
+        rik.register(f.kid, f.headerB64, f.payloadB64, f.signature, repoId, ownerId, ownerId, wallet);
     }
 
     /// @dev Registers `REPO_ID` to `alice` and launches its market.

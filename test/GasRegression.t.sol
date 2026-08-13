@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 pragma solidity ^0.8.24;
 
-import {console2} from "forge-std/console2.sol";
 import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
+import {console2} from "forge-std/console2.sol";
 
 import {ClaimMatcher} from "../src/ClaimMatcher.sol";
 import {GithubOidcVerifier} from "../src/GithubOidcVerifier.sol";
@@ -15,8 +15,8 @@ import {OidcFixture} from "./OidcFixture.sol";
 /**
  * @dev Holds the two optimizations to the reason they were made.
  *
- * {ClaimMatcher} and {RIK-_audienceOf} are hand-written assembly that exists only to be cheaper than
- * a correct, audited alternative that is still sitting in the repository. Correctness is pinned
+ * {ClaimMatcher} and {RIK-_addressText} are hand-written assembly that exists only to be cheaper
+ * than a correct, audited alternative that is still sitting in the repository. Correctness is pinned
  * elsewhere, differentially. What is pinned here is the other half of the bargain: if either one
  * ever stops being faster than the thing it replaced, it has no reason to exist and should be
  * deleted rather than maintained.
@@ -25,8 +25,12 @@ import {OidcFixture} from "./OidcFixture.sol";
  * every number does not produce a false failure.
  */
 contract GasRegression_T is OidcFixture {
+    uint64 constant ATTESTATION_REPO_ID = 900100200;
+    string constant WORKFLOW_REF = "freecodexyz/market/.github/workflows/register-rik.yml@refs/heads/main";
+
     uint256 constant REPO_ID = 1296269;
     uint256 constant OWNER_ID = 583231;
+    uint256 constant ACTOR_ID = 583231;
 
     GithubOidcVerifier verifier;
     RIK rik;
@@ -36,7 +40,9 @@ contract GasRegression_T is OidcFixture {
 
     function setUp() public {
         verifier = new GithubOidcVerifier(address(this));
-        rik = new RIK(verifier);
+        rik = new RIK(address(this), verifier);
+        rik.setAttestationRepoId(ATTESTATION_REPO_ID);
+        rik.setJobWorkflowRef(WORKFLOW_REF);
         audience = new AudienceHarness();
     }
 
@@ -46,29 +52,31 @@ contract GasRegression_T is OidcFixture {
         return verifier.verifyGithubOidc(f.kid, f.headerB64, f.payloadB64, f.signature);
     }
 
-    /// @dev All four claims RIK checks, through the vendored matcher.
+    /// @dev All five claims RIK checks, through the vendored matcher.
     function _vendoredClaims(bytes memory payload, string memory aud) internal view returns (uint256 used) {
         uint256 g = gasleft();
         JsonClaim.requireStringClaim(payload, "aud", aud);
-        JsonClaim.requireStringClaim(payload, "repository_id", Strings.toString(REPO_ID));
-        JsonClaim.requireStringClaim(payload, "repository_owner_id", Strings.toString(OWNER_ID));
-        JsonClaim.requireStringClaim(payload, "event_name", "workflow_dispatch");
+        JsonClaim.requireStringClaim(payload, "actor_id", Strings.toString(ACTOR_ID));
+        JsonClaim.requireStringClaim(payload, "repository_id", Strings.toString(uint256(ATTESTATION_REPO_ID)));
+        JsonClaim.requireStringClaim(payload, "event_name", "issues");
+        JsonClaim.requireStringClaim(payload, "job_workflow_ref", WORKFLOW_REF);
         used = g - gasleft();
     }
 
-    /// @dev The same four, through the unrolled matcher RIK actually links against.
+    /// @dev The same five, through the unrolled matcher RIK actually links against.
     function _unrolledClaims(bytes memory payload, string memory aud) internal view returns (uint256 used) {
         uint256 g = gasleft();
         ClaimMatcher.requireStringClaim(payload, "aud", aud);
-        ClaimMatcher.requireStringClaim(payload, "repository_id", Strings.toString(REPO_ID));
-        ClaimMatcher.requireStringClaim(payload, "repository_owner_id", Strings.toString(OWNER_ID));
-        ClaimMatcher.requireStringClaim(payload, "event_name", "workflow_dispatch");
+        ClaimMatcher.requireStringClaim(payload, "actor_id", Strings.toString(ACTOR_ID));
+        ClaimMatcher.requireStringClaim(payload, "repository_id", Strings.toString(uint256(ATTESTATION_REPO_ID)));
+        ClaimMatcher.requireStringClaim(payload, "event_name", "issues");
+        ClaimMatcher.requireStringClaim(payload, "job_workflow_ref", WORKFLOW_REF);
         used = g - gasleft();
     }
 
     function test_UnrolledMatcherIsCheaperThanTheVendoredOne() public {
         bytes memory payload = _payload();
-        string memory aud = Strings.toHexString(uint160(alice), 20);
+        string memory aud = rik.audienceOf(alice, REPO_ID, OWNER_ID);
 
         // Warm both paths so the comparison is not measuring first-touch memory expansion.
         _vendoredClaims(payload, aud);
@@ -95,14 +103,14 @@ contract GasRegression_T is OidcFixture {
         audience.stringsAudienceOf(alice);
         uint256 library_ = g - gasleft();
 
-        console2.log("audience, hand-written", handWritten);
-        console2.log("audience, Strings     ", library_);
-        assertLt(handWritten, library_, "_audienceOf is no longer cheaper than Strings.toHexString");
+        console2.log("address text, hand-written", handWritten);
+        console2.log("address text, Strings     ", library_);
+        assertLt(handWritten, library_, "_addressText is no longer cheaper than Strings.toHexString");
     }
 
     /// @dev Reports the split so a future reader can see what is worth attacking, and what is not.
-    ///      Two thirds of a registration is RSA verification inside the vendored verifier, which
-    ///      this repository does not own and must not fork.
+    ///      Most of a registration is RSA verification inside the vendored verifier, which this
+    ///      repository does not own and must not fork.
     function test_ReportRegisterBreakdown() public {
         Fixture memory f = _fixture("sample-jwt.json");
         verifier.addKey(f.kid, f.modulus, f.exponent);
@@ -112,7 +120,7 @@ contract GasRegression_T is OidcFixture {
         uint256 verifyGas = g - gasleft();
 
         g = gasleft();
-        rik.register(f.kid, f.headerB64, f.payloadB64, f.signature, REPO_ID, OWNER_ID, alice);
+        rik.register(f.kid, f.headerB64, f.payloadB64, f.signature, REPO_ID, OWNER_ID, ACTOR_ID, alice);
         uint256 registerGas = g - gasleft();
 
         console2.log("payload bytes        ", payload.length);

@@ -21,6 +21,12 @@ module Market
     # `aud` claim, so this key holds no authority over the registry.
     REGISTRAR_SECRET = "FCF_REGISTRAR_PRIVATE_KEY"
 
+    # Optional. Lets the attestation workflow ask GitHub whether an issue opener holds `admin` on
+    # the repository being claimed, which is how organisation repositories are proven without the
+    # organisation touching them. The app needs `Metadata: read` and nothing else.
+    APP_ID_VARIABLE = "FCF_APP_ID"
+    APP_KEY_SECRET = "FCF_APP_PRIVATE_KEY"
+
     def initialize(root: Dir.pwd)
       @root = root
       @config = Config.load(root)
@@ -69,7 +75,8 @@ module Market
       nil
     end
 
-    def deploy(rpc_url: nil, verifier: nil, airlock: nil, splitter_owner: nil)
+    def deploy(rpc_url: nil, verifier: nil, airlock: nil, splitter_owner: nil, rik_owner: nil,
+               attestation_repo_id: nil, job_workflow_ref: nil)
       Shell.require_tools!("forge", "cast")
 
       config.rpc_url = rpc_url if rpc_url
@@ -82,9 +89,25 @@ module Market
       raise InvalidState, "#{config.rpc_url} is unreachable" unless chain.reachable?
 
       deployer = chain.address_of(private_key)
-      # Defaulted here rather than in the script, so whoever ends up able to sweep integrator fees
-      # is printed in the plan and recorded in the config instead of being implied by a key.
+      # Defaulted here rather than in the script, so whoever ends up holding each authority is
+      # printed in the plan and recorded in the config instead of being implied by a key.
       config.splitter_owner = splitter_owner || config.splitter_owner || deployer
+      config.rik_owner = rik_owner || config.rik_owner || deployer
+
+      # Derived from the checkout rather than typed, because a hand-assembled workflow ref is the
+      # easiest way to deploy a registry that rejects every proof. The override exists for a local
+      # chain and for a checkout with no GitHub remote, and says so out loud.
+      if attestation_repo_id && job_workflow_ref
+        config.attestation_repo_id = Integer(attestation_repo_id)
+        config.job_workflow_ref = job_workflow_ref
+        attestation_source = "supplied by hand"
+      else
+        Shell.require_tools!("gh")
+        repo = github.current_repo
+        config.attestation_repo_id = repo.database_id
+        config.job_workflow_ref = repo.job_workflow_ref
+        attestation_source = repo.slug
+      end
 
       UI.heading "Plan"
       UI.field "chain", chain.chain_id
@@ -92,6 +115,11 @@ module Market
       UI.field "balance", "#{chain.balance_eth(deployer)} ETH"
       UI.field "verifier", config.verifier
       UI.field "airlock", config.airlock
+      UI.field "attestation repo", "#{attestation_source} (#{config.attestation_repo_id})"
+      UI.field "workflow ref", config.job_workflow_ref
+      UI.warn "attestation source was typed, not derived from the checkout" if attestation_repo_id
+      UI.field "rik owner", config.rik_owner
+      UI.note "the rik owner can repoint the attestation source, and so can mint any repository's key"
       UI.field "splitter owner", config.splitter_owner
       UI.note "the splitter owner can sweep integrator fees; it cannot touch a repository's bucket"
 
@@ -102,7 +130,16 @@ module Market
       UI.heading "Deploying"
       UI.step "RIK"
       rik = expect_contract(
-        chain.run_script(RIK_SCRIPT, env: { "JWT_VERIFIER_ADDRESS" => config.verifier }, private_key: private_key),
+        chain.run_script(
+          RIK_SCRIPT,
+          env: {
+            "JWT_VERIFIER_ADDRESS" => config.verifier,
+            "RIK_OWNER" => config.rik_owner,
+            "ATTESTATION_REPO_ID" => config.attestation_repo_id,
+            "JOB_WORKFLOW_REF" => config.job_workflow_ref
+          },
+          private_key: private_key
+        ),
         "RIK"
       )
       UI.ok "#{rik.address} (block #{rik.block})"
@@ -131,6 +168,10 @@ module Market
 
       UI.heading "Saved"
       UI.note "#{Config::FILENAME} updated. Next: market status, then market configure."
+      unless config.rik_owner.to_s.casecmp?(deployer)
+        UI.warn "ownership of RIK is pending: #{config.rik_owner} must call acceptOwnership"
+        UI.note "until it does, the deployer key still controls the attestation source"
+      end
       nil
     end
 
@@ -157,6 +198,12 @@ module Market
       UI.field "symbol", chain.call_string(config.rik, "symbol()(string)")
       UI.field "expected event", chain.call_string(config.rik, "expectedEventName()(string)")
       compare "verifier", chain.call(config.rik, "jwt()(address)"), config.verifier
+      UI.field "owner", chain.call(config.rik, "owner()(address)")
+      pending_rik = chain.call(config.rik, "pendingOwner()(address)")
+      UI.field "pending owner", zero?(pending_rik) ? "none" : pending_rik
+
+      UI.heading "Attestation source"
+      report_attestation_source
 
       return UI.warn "market contracts not deployed yet" unless config.deployed?
 
@@ -176,7 +223,7 @@ module Market
       nil
     end
 
-    def configure(registrar_key: nil, dry_run: false)
+    def configure(registrar_key: nil, app_id: nil, app_private_key: nil, dry_run: false)
       require_deployment!
       Shell.require_tools!("gh")
 
@@ -194,6 +241,14 @@ module Market
         UI.ok "#{name} = #{value}"
       end
 
+      id = app_id || ENV.fetch(APP_ID_VARIABLE, nil)
+      if id.to_s.empty?
+        UI.warn "#{APP_ID_VARIABLE} skipped; pass --app-id to enable the organisation path"
+      else
+        github.set_variable(APP_ID_VARIABLE, id) unless dry_run
+        UI.ok "#{APP_ID_VARIABLE} = #{id}"
+      end
+
       UI.heading "Repository secrets"
       key = registrar_key || ENV.fetch(REGISTRAR_SECRET, nil)
       if key.to_s.empty?
@@ -202,6 +257,14 @@ module Market
       else
         github.set_secret(REGISTRAR_SECRET, key) unless dry_run
         UI.ok REGISTRAR_SECRET
+      end
+
+      app_key = app_private_key || ENV.fetch(APP_KEY_SECRET, nil)
+      if app_key.to_s.empty?
+        UI.warn "#{APP_KEY_SECRET} skipped; without it, organisations prove control with a topic"
+      else
+        github.set_secret(APP_KEY_SECRET, app_key) unless dry_run
+        UI.ok APP_KEY_SECRET
       end
 
       UI.note "there is no key-sync secret here; the verifier and its owner key live in identity"
@@ -255,6 +318,34 @@ module Market
       else
         UI.field label, "#{actual} (expected #{expected})", colour: :red
       end
+    end
+
+    # The registry only accepts proofs from one workflow file in one repository. Both are read back
+    # from the chain and compared against this checkout, because a mismatch is silent: every
+    # registration simply fails, with nothing on-chain to explain why.
+    def report_attestation_source
+      on_chain_repo = chain.call_integer(config.rik, "attestationRepoId()(uint64)")
+      on_chain_ref = chain.call_string(config.rik, "jobWorkflowRef()(string)")
+
+      if on_chain_repo.zero? || on_chain_ref.empty?
+        UI.error "not configured; the registry rejects every proof until it is"
+        return
+      end
+
+      begin
+        repo = github.current_repo
+      rescue Error => e
+        UI.field "repository id", on_chain_repo
+        UI.field "workflow ref", on_chain_ref
+        UI.warn "could not resolve this checkout to compare: #{e.message.lines.first.strip}"
+        return
+      end
+
+      compare "repository id", on_chain_repo, repo.database_id
+      compare "workflow ref", on_chain_ref, repo.job_workflow_ref
+      UI.note "proofs come from #{GitHub::WORKFLOW_PATH} in #{repo.slug}, opened as an issue"
+    rescue CommandFailed => e
+      UI.warn "could not read the attestation source: #{e.message.lines.first.strip}"
     end
 
     def report_verifier

@@ -11,10 +11,10 @@ import {RIK} from "../src/RIK.sol";
 /// @dev Exposes the internal encoder, and allocates after it so the free pointer can be checked.
 ///      The verifier is never called here, but it cannot be the zero address: {RIK} rejects that.
 contract AudienceHarness is RIK {
-    constructor() RIK(IJwtVerifier(address(0xBEEF))) {}
+    constructor() RIK(address(0xA11CE), IJwtVerifier(address(0xBEEF))) {}
 
     function audienceOf(address wallet) external pure returns (string memory) {
-        return _audienceOf(wallet);
+        return _addressText(wallet);
     }
 
     /// @dev The implementation being replaced, behind the same call boundary so the two can be
@@ -30,7 +30,7 @@ contract AudienceHarness is RIK {
         pure
         returns (string memory audience, bytes memory allocated)
     {
-        audience = _audienceOf(wallet);
+        audience = _addressText(wallet);
         allocated = new bytes(filler);
         for (uint256 i = 0; i < filler; ++i) {
             allocated[i] = 0xFF;

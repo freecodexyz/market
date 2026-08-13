@@ -41,12 +41,15 @@ module Market
         return
       end
 
-      record = chain.call_tuple(rik, "repoOf(uint256)((uint64,uint64,uint64))", repo_id)
+      record = chain.call_tuple(rik, "repoOf(uint256)((uint64,uint64,uint64,uint64))", repo_id)
       UI.field "token id", repo_id
       UI.field "holder", chain.call(rik, "ownerOf(uint256)(address)", repo_id)
       UI.field "repository id", record[0]
       UI.field "owner id", record[1]
-      UI.field "registered at", timestamp(record[2])
+      # With an organisation repository the claimant and the owner are different accounts, and the
+      # difference is the interesting part of the record.
+      UI.field "claimed by", record[2]
+      UI.field "registered at", timestamp(record[3])
 
       metadata(rik, repo_id)
       show_market(repo_id) if deployment.config.deployed?

@@ -14,8 +14,12 @@ import {OidcFixture} from "./OidcFixture.sol";
  *      substring matching in Solidity, so malformed JSON fails loudly instead of passing quietly.
  */
 contract RIKMetadata_T is OidcFixture {
+    uint64 constant ATTESTATION_REPO_ID = 900100200;
+    string constant WORKFLOW_REF = "freecodexyz/market/.github/workflows/register-rik.yml@refs/heads/main";
+
     uint256 constant REPO_ID = 1296269;
     uint256 constant OWNER_ID = 583231;
+    uint256 constant ACTOR_ID = 583231;
 
     GithubOidcVerifier verifier;
     RIK rik;
@@ -25,13 +29,15 @@ contract RIKMetadata_T is OidcFixture {
 
     function setUp() public {
         verifier = new GithubOidcVerifier(address(this));
-        rik = new RIK(verifier);
+        rik = new RIK(address(this), verifier);
+        rik.setAttestationRepoId(ATTESTATION_REPO_ID);
+        rik.setJobWorkflowRef(WORKFLOW_REF);
     }
 
     function _registered(uint256 repoId, uint256 ownerId, address wallet) internal {
-        Fixture memory f = _fixture("sample-jwt.json", repoId, ownerId, wallet);
+        Fixture memory f = _fixture("sample-jwt.json", repoId, ownerId, ACTOR_ID, wallet);
         verifier.addKey(f.kid, f.modulus, f.exponent);
-        rik.register(f.kid, f.headerB64, f.payloadB64, f.signature, repoId, ownerId, wallet);
+        rik.register(f.kid, f.headerB64, f.payloadB64, f.signature, repoId, ownerId, ACTOR_ID, wallet);
     }
 
     function _metadata(uint256 tokenId) internal returns (string memory) {
@@ -92,6 +98,22 @@ contract RIKMetadata_T is OidcFixture {
 
         assertEq(vm.parseJsonString(json, ".trait_github_repository_id"), "1296269");
         assertEq(vm.parseJsonString(json, ".trait_github_owner_id"), "583231");
+    }
+
+    /// @dev Who claimed the repository is part of the public record, because with an org repository
+    ///      the claimant and the owner are different accounts and the difference is worth seeing.
+    function test_MetadataCarriesTheClaimant() public {
+        uint64 orgId = 9919;
+        uint64 memberId = 4242;
+
+        Fixture memory f = _fixture("sample-jwt.json", REPO_ID, orgId, memberId, alice);
+        verifier.addKey(f.kid, f.modulus, f.exponent);
+        rik.register(f.kid, f.headerB64, f.payloadB64, f.signature, REPO_ID, orgId, memberId, alice);
+
+        string memory json = _metadata(REPO_ID);
+        assertEq(vm.parseJsonString(json, ".trait_github_owner_id"), "9919");
+        assertEq(vm.parseJsonString(json, ".trait_claimed_by_github_user_id"), "4242");
+        assertEq(vm.parseJsonString(json, ".image"), "https://avatars.githubusercontent.com/u/9919");
     }
 
     function test_MetadataCarriesRegistrationDate() public {
