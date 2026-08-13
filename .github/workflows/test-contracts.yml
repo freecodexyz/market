@@ -58,8 +58,11 @@ jobs:
       - name: Run Forge fmt
         run: forge fmt --check
 
+      - name: Check workflow run blocks
+        run: ruby .github/scripts/check-workflows.rb
+
       - name: Run Forge lint
-        run: forge lint --deny-warnings
+        run: forge lint --deny warnings
 
       - name: Run Forge build
         run: forge build --sizes

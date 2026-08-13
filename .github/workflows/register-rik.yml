@@ -173,22 +173,32 @@ jobs:
             "$WALLET" "$REPO_ID" "$OWNER_ID" --rpc-url "$RPC_URL" | sed 's/^"//; s/"$//')"
           echo "Requesting a token for audience: $audience"
 
+          if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ] || [ -z "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" ]; then
+            echo '::error::no OIDC request credentials; this job needs id-token: write'
+            exit 1
+          fi
+
           encoded="$(jq -rn --arg v "$audience" '$v|@uri')"
-          token="$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$encoded" | jq -r '.value')"
+          response="$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$encoded")"
+          token="$(printf '%s' "$response" | jq -r '.value // empty')"
 
-          header_b64="$(printf '%s' "$token" | cut -d. -f1)"
-          payload_b64="$(printf '%s' "$token" | cut -d. -f2)"
-          signature_b64="$(printf '%s' "$token" | cut -d. -f3)"
+          if [ -z "$token" ]; then
+            echo "::error::the OIDC provider returned no token"
+            printf '%s\n' "$response" | head -5
+            exit 1
+          fi
 
-          # The contract addresses keys by keccak of the raw `kid` string; this must stay identical
-          # to how the identity repository's key sync stores them.
-          kid_text="$(printf '%s' "$header_b64" | basenc --base64url -d 2>/dev/null | jq -r '.kid')"
+          # Decoded in Node because a JWS uses unpadded base64url, which shell base64 decoders
+          # reject. The contract addresses signing keys by keccak of the raw `kid` string, which
+          # must stay identical to how the identity repository's key sync stores them.
+          decoded="$(node .github/scripts/decode-jwt.mjs "$token")"
+          kid_text="$(printf '%s\n' "$decoded" | sed -n '1p')"
+          header="$(printf '%s\n' "$decoded" | sed -n '2p')"
+          payload="$(printf '%s\n' "$decoded" | sed -n '3p')"
+          signature="$(printf '%s\n' "$decoded" | sed -n '4p')"
+
           kid="$(cast keccak "$kid_text")"
-
-          signature="0x$(printf '%s' "$signature_b64" | basenc --base64url -d 2>/dev/null | xxd -p | tr -d '\n')"
-          header="0x$(printf '%s' "$header_b64" | xxd -p | tr -d '\n')"
-          payload="0x$(printf '%s' "$payload_b64" | xxd -p | tr -d '\n')"
 
           args=("$kid" "$header" "$payload" "$signature" "$REPO_ID" "$OWNER_ID" "$ACTOR_ID" "$WALLET")
           signature_abi="register(bytes32,bytes,bytes,bytes,uint256,uint256,uint256,address)"
