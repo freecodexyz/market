@@ -13,16 +13,16 @@ import {AudienceHarness} from "./RIKAudience.t.sol";
 import {OidcFixture} from "./OidcFixture.sol";
 
 /**
- * @dev Holds the two optimizations to the reason they were made.
+ * @dev Asserts that the two hand-written optimizations remain faster than the alternatives they
+ *      replaced.
  *
- * {ClaimMatcher} and {RIK-_addressText} are hand-written assembly that exists only to be cheaper
- * than a correct, audited alternative that is still sitting in the repository. Correctness is pinned
- * elsewhere, differentially. What is pinned here is the other half of the bargain: if either one
- * ever stops being faster than the thing it replaced, it has no reason to exist and should be
- * deleted rather than maintained.
+ * {ClaimMatcher} and {RIK-_addressText} are hand-written assembly whose only justification is being
+ * cheaper than a correct, audited alternative that remains in the repository. Correctness is covered
+ * by the differential suites. If either stops being faster, it should be removed rather than
+ * maintained.
  *
- * The assertions are relative rather than absolute, so a compiler or dependency upgrade that moves
- * every number does not produce a false failure.
+ * The assertions are relative rather than absolute, so a compiler or dependency upgrade that changes
+ * every number does not cause a false failure.
  */
 contract GasRegression_T is OidcFixture {
     uint64 constant ATTESTATION_REPO_ID = 900100200;
@@ -63,7 +63,7 @@ contract GasRegression_T is OidcFixture {
         used = g - gasleft();
     }
 
-    /// @dev The same five, through the unrolled matcher RIK actually links against.
+    /// @dev The same five, through the matcher RIK links against.
     function _unrolledClaims(bytes memory payload, string memory aud) internal view returns (uint256 used) {
         uint256 g = gasleft();
         ClaimMatcher.requireStringClaim(payload, "aud", aud);
@@ -108,9 +108,8 @@ contract GasRegression_T is OidcFixture {
         assertLt(handWritten, library_, "_addressText is no longer cheaper than Strings.toHexString");
     }
 
-    /// @dev Reports the split so a future reader can see what is worth attacking, and what is not.
-    ///      Most of a registration is RSA verification inside the vendored verifier, which this
-    ///      repository does not own and must not fork.
+    /// @dev Reports where registration gas is spent. Most of it is RSA verification inside the
+    ///      vendored verifier, which this repository does not own and must not fork.
     function test_ReportRegisterBreakdown() public {
         Fixture memory f = _fixture("sample-jwt.json");
         verifier.addKey(f.kid, f.modulus, f.exponent);

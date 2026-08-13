@@ -20,60 +20,57 @@ import {IJwtVerifier} from "./IJwtVerifier.sol";
  *
  *      # Proof model
  *
- *      Registration is an issue opened on the attestation repository. Nothing is committed to the
- *      repository being claimed, nothing is installed by the claimant, and the transaction is paid
- *      for by a relayer, so a repository owner needs a wallet address and nothing else.
+ *      Registration is triggered by an issue opened on the attestation repository. The claimant
+ *      commits nothing to the repository being claimed, installs nothing, and does not submit the
+ *      transaction; a relayer does.
  *
- *      That shape has a consequence. The proof is produced by a workflow running *here*, so
- *      `repository_id` names the attestation repository and `actor_id` names whoever opened the
- *      issue. Neither says anything about the repository being claimed. Every claim in an Actions
- *      OIDC token is set by GitHub except one: `aud` is an arbitrary string chosen by the workflow
- *      at the moment it requests the token. It is therefore the only channel a reviewed workflow has
- *      to speak to this contract, and it carries the whole claim:
+ *      The proof is therefore produced by a workflow running in the attestation repository, so
+ *      `repository_id` identifies that repository and `actor_id` identifies the account that opened
+ *      the issue. Neither describes the repository being claimed. Every claim in an Actions OIDC
+ *      token is set by GitHub except `aud`, which is an arbitrary string supplied by the workflow
+ *      when it requests the token. `aud` therefore carries the claim being made:
  *
  *          aud = "<wallet>:<repositoryId>:<ownerId>"
  *
- *      The remaining checks exist to prove that string came from code that has been reviewed:
+ *      The remaining checks establish that this string was produced by reviewed code:
  *
- *      - `repository_id` must equal {attestationRepoId}. Without it, anyone could invoke the
- *        attestation workflow as a reusable workflow from their own repository and choose `aud`.
- *      - `job_workflow_ref` must equal {jobWorkflowRef}. This pins the exact file and ref that chose
- *        `aud`, so the attestation repository's owner cannot silently rewrite it; rotating the
- *        workflow requires an owner transaction on this contract.
+ *      - `repository_id` must equal {attestationRepoId}. Without it, the attestation workflow could
+ *        be invoked as a reusable workflow from another repository, which would let the caller
+ *        choose `aud`.
+ *      - `job_workflow_ref` must equal {jobWorkflowRef}. This pins the file and ref that produced
+ *        `aud`. Rotating the workflow requires an owner transaction on this contract.
  *      - `event_name` must equal {expectedEventName} (`issues`). The `issues` trigger runs in the
- *        attestation repository's context while setting `actor_id` to the *external* account that
- *        opened the issue, which is what lets somebody prove a repository without granting this
- *        project any permission over it.
- *      - `actor_id` must equal the account being credited with the claim.
+ *        attestation repository's context while setting `actor_id` to the external account that
+ *        opened the issue, so a claimant can prove a repository without granting this project any
+ *        permission over it.
+ *      - `actor_id` must equal the account credited with the claim.
  *
- *      Dropping any one of those reintroduces impersonation.
+ *      Removing any one of these checks permits impersonation.
  *
- *      This contract cannot check "does this account control that repository", and does not try.
- *      It checks that the answer came from the pinned workflow. How that workflow establishes
- *      control — repository ownership, a GitHub App confirming `admin`, or an admin-only topic
- *      challenge — is written up in ATTESTATION.md, and is a protocol concern rather than a
- *      contract one.
+ *      This contract does not determine whether an account controls a repository. It verifies that
+ *      the answer originated from the pinned workflow. How that workflow establishes control —
+ *      repository ownership, a GitHub App confirming `admin`, or an admin-only topic challenge — is
+ *      documented in ATTESTATION.md and is out of scope for the contract.
  *
  *      # Ownership
  *
- *      A repository registers exactly once, and the key is then freely transferable. Both halves are
- *      deliberate: royalties from the repository's market follow whoever holds the key, so it has to
- *      be tradeable, and re-registration must never exist, or a repository owner could yank the key
- *      back from someone who bought it. Rotating wallets is a transfer.
+ *      A repository registers exactly once and the key is then transferable. Royalties from the
+ *      repository's market follow the current holder, so the key must be tradeable; re-registration
+ *      must not exist, or a repository owner could reclaim a key that has been sold. Rotating
+ *      wallets is done by transferring the key.
  *
- *      The owner of this contract can change the attestation source, and can therefore point it at a
- *      workflow it controls and mint any repository's key. It is the most powerful role in the
- *      system and belongs behind a multisig or a timelock.
+ *      The owner of this contract can change the attestation source, and can therefore point it at
+ *      a workflow it controls and mint any repository's key. This is the highest-privilege role in
+ *      the system and should be held by a multisig or timelock.
  *
  *      # Metadata
  *
- *      Metadata is served fully on-chain as a base64 data URI and is immutable once minted, so
- *      ERC-4906 is not implemented. Only numeric ids are interpolated into the JSON, never a
- *      repository name or owner login, which is what makes the encoding injection-free without a
- *      charset validator.
+ *      Metadata is served on-chain as a base64 data URI and is immutable once minted, so ERC-4906 is
+ *      not implemented. Only numeric ids are interpolated into the JSON, never a repository name or
+ *      owner login, so no escaping or charset validation is required.
  */
 contract RIK is ERC721, Ownable2Step {
-    /// @dev The only trigger that runs here while naming an external account as the actor.
+    /// @dev The only trigger that runs in this repository while naming an external account as the actor.
     string private constant _EXPECTED_EVENT = "issues";
 
     /// @dev Left-aligned lookup word for {_addressText}.
@@ -81,18 +78,18 @@ contract RIK is ERC721, Ownable2Step {
 
     /// @dev Avatars are addressable by account id, so the image needs no stored string.
     string private constant _AVATAR_BASE_URI = "https://avatars.githubusercontent.com/u/";
-    /// @dev GitHub has no id-addressable HTML page for a repository; the REST resource is the only
-    ///      link that survives a rename, which is the property this record is built on.
+    /// @dev GitHub has no id-addressable HTML page for a repository. The REST resource is the only
+    ///      link addressable by id, and therefore the only one that survives a rename.
     string private constant _REPOSITORY_BASE_URI = "https://api.github.com/repositories/";
 
     /**
-     * @dev The registration record. Four `uint64` fields share one slot, so a registration costs a
-     *      single storage write. The wallet is not stored here; it is the ERC-721 owner, and it
-     *      changes on every transfer.
+     * @dev The registration record. Four `uint64` fields occupy one slot, so a registration costs a
+     *      single storage write. The wallet is not stored here; it is the ERC-721 owner and changes
+     *      on transfer.
      */
     struct Repo {
         uint64 githubRepoId; // == tokenId -> kept for clarity
-        uint64 githubOwnerId; // account or organisation that owned the repository at mint
+        uint64 githubOwnerId; // account or organisation owning the repository at mint
         uint64 githubActorId; // account that opened the issue and was credited with the claim
         uint64 registeredAt; // block.timestamp -> truncated at uint64
     }
@@ -100,9 +97,10 @@ contract RIK is ERC721, Ownable2Step {
     /**
      * @dev Emitted once per repository, when its key is minted.
      *
-     * `registrant` is whoever paid for the transaction and holds no authority; the key goes to
-     * `wallet`, which the proof names. It is indexed so a relayer can find the registrations it
-     * funded, and it is not stored, because the mint {IERC721-Transfer} already records the holder.
+     * `registrant` is the account that paid for the transaction and holds no authority. The key is
+     * minted to `wallet`, which the proof names. `registrant` is indexed so a relayer can find the
+     * registrations it funded, and is not stored because the mint {IERC721-Transfer} already
+     * records the holder.
      */
     event RepoRegistered(
         uint256 indexed githubRepoId,
@@ -135,9 +133,8 @@ contract RIK is ERC721, Ownable2Step {
      *      configured through {setAttestationRepoId} and {setJobWorkflowRef} before any
      *      registration can succeed.
      *
-     * The verifier is immutable, so pointing at a different one means deploying a different
-     * registry, which is why a zero address is rejected here rather than discovered on the first
-     * failed registration.
+     * The verifier is immutable, so using a different one requires deploying a new registry. A zero
+     * address is rejected here rather than surfacing as a failure on the first registration.
      *
      * Requirements:
      *
@@ -154,9 +151,8 @@ contract RIK is ERC721, Ownable2Step {
     /**
      * @dev Registers the GitHub repository `githubRepoId` and mints its key to `wallet`.
      *
-     * Anyone may submit this call. The proof itself names its beneficiary through the `aud` claim,
-     * so a relayer can pay the gas without being able to redirect the key. That is what makes
-     * registration free for the repository owner.
+     * Anyone may submit this call. The proof names its beneficiary through the `aud` claim, so a
+     * relayer can pay the gas without being able to redirect the key.
      *
      * Requirements:
      *
@@ -216,19 +212,64 @@ contract RIK is ERC721, Ownable2Step {
     /**
      * @dev Returns the exact `aud` claim a proof must carry to register this triple.
      *
-     * Public because it is the single source of truth for the encoding: the attestation workflow
-     * asks this contract what audience to request rather than reimplementing the format, so the two
-     * cannot drift apart.
+     * Public so that the attestation workflow can query the encoding rather than reimplementing it.
+     * This contract is the single definition of the format.
      */
     function audienceOf(address wallet, uint256 githubRepoId, uint256 githubOwnerId)
         public
         pure
         virtual
-        returns (string memory)
+        returns (string memory audience)
     {
-        return string.concat(
-            _addressText(wallet), ":", Strings.toString(githubRepoId), ":", Strings.toString(githubOwnerId)
-        );
+        // Equivalent to `string.concat(_addressText(wallet), ":", toString(repoId), ":",
+        // toString(ownerId))`, built in a single pass rather than four allocations and a copy.
+        // `testFuzz_AudienceIsTheConcatenation` compares the two.
+        //
+        // Written right to left because a decimal number's length is not known until it has been
+        // divided out. 256 bytes covers the worst case: 42 for the address, two separators, two
+        // decimal numbers of at most 78 digits, and the length word.
+        assembly ("memory-safe") {
+            let buffer := mload(0x40)
+            let end := add(buffer, 0x100)
+            let cursor := end
+
+            // Writes the digits of `value`, least significant first, moving the cursor backwards.
+            function writeDecimal(to, value) -> at {
+                at := to
+                for {} 1 {} {
+                    at := sub(at, 1)
+                    mstore8(at, add(48, mod(value, 10)))
+                    value := div(value, 10)
+                    if iszero(value) { break }
+                }
+            }
+
+            cursor := writeDecimal(cursor, githubOwnerId)
+            cursor := sub(cursor, 1)
+            mstore8(cursor, 0x3a) // ":"
+
+            cursor := writeDecimal(cursor, githubRepoId)
+            cursor := sub(cursor, 1)
+            mstore8(cursor, 0x3a) // ":"
+
+            let value := wallet
+            for { let i := 0 } lt(i, 40) { i := add(i, 1) } {
+                cursor := sub(cursor, 1)
+                mstore8(cursor, byte(and(value, 0xf), _HEX_DIGITS))
+                value := shr(4, value)
+            }
+
+            cursor := sub(cursor, 1)
+            mstore8(cursor, 0x78) // "x"
+            cursor := sub(cursor, 1)
+            mstore8(cursor, 0x30) // "0"
+
+            // The length word is written immediately before the text, which remains inside the
+            // allocated region: the worst case leaves 24 bytes of head room.
+            audience := sub(cursor, 0x20)
+            mstore(audience, sub(end, cursor))
+            mstore(0x40, end)
+        }
     }
 
     /**
@@ -367,15 +408,15 @@ contract RIK is ERC721, Ownable2Step {
             registeredAt
         );
 
-        // `_safeMint` rather than `_mint`, because this key is transferable and valuable: minting
-        // one into a contract that cannot move ERC-721s would strand a repository's market and its
-        // royalties permanently, and a registration that reverts costs nothing but a re-run.
+        // `_safeMint` rather than `_mint`: the key is transferable and carries the repository's
+        // royalties, so minting into a contract that cannot transfer an ERC-721 would strand them
+        // permanently. A reverted registration can simply be retried.
         //
-        // The receiver hook it introduces runs after every state change above, so a reentrant
-        // `register` sees a fully consistent registry and is rejected by the {AlreadyRegistered}
-        // check for this repository. Registering a *different* repository from inside the hook is
-        // legitimate and deliberately still allowed, which is why there is no reentrancy guard.
-        // Also reverts on a zero `wallet`.
+        // The receiver hook runs after every state change above, so a reentrant `register` for this
+        // repository observes a consistent registry and is rejected by the {AlreadyRegistered}
+        // check. Registering a different repository from inside the hook is valid and remains
+        // permitted, which is why no reentrancy guard is applied. `_safeMint` also reverts on a
+        // zero `wallet`.
         _safeMint(wallet, githubRepoId);
     }
 
@@ -394,25 +435,65 @@ contract RIK is ERC721, Ownable2Step {
         string memory workflowRef = _jobWorkflowRef;
         if (repoId == 0 || bytes(workflowRef).length == 0) revert AttestationSourceNotConfigured();
 
-        // The whole claim, in the one field a workflow controls: which wallet, which repository,
-        // which owner. Everything else below exists to prove this string came from reviewed code.
-        ClaimMatcher.requireStringClaim(payload, "aud", audienceOf(wallet, githubRepoId, githubOwnerId));
-        // The GitHub account that opened the issue, set by GitHub rather than by the workflow.
-        ClaimMatcher.requireStringClaim(payload, "actor_id", Strings.toString(githubActorId));
-        // Together these three pin the code that chose `aud` to the reviewed attestation workflow.
-        ClaimMatcher.requireStringClaim(payload, "repository_id", Strings.toString(uint256(repoId)));
-        ClaimMatcher.requireStringClaim(payload, "event_name", _EXPECTED_EVENT);
-        ClaimMatcher.requireStringClaim(payload, "job_workflow_ref", workflowRef);
+        // Checked in the order GitHub emits them so the scan makes one pass over the payload rather
+        // than restarting for each claim. Correctness is independent of the order, because a claim
+        // positioned before the cursor is found on the wrap. See {ClaimMatcher-indexOfFrom}.
+        uint256 cursor = 0;
+
+        // The claim being made: wallet, repository and owner. The checks that follow establish that
+        // this string was produced by reviewed code.
+        cursor = ClaimMatcher.requireStringClaimFrom(
+            payload, "aud", audienceOf(wallet, githubRepoId, githubOwnerId), cursor
+        );
+        // With the workflow ref, pins the code that produced `aud` to the attestation workflow.
+        cursor = ClaimMatcher.requireStringClaimFrom(payload, "repository_id", _decimalText(uint256(repoId)), cursor);
+        // Set by GitHub, not by the workflow.
+        cursor = ClaimMatcher.requireStringClaimFrom(payload, "actor_id", _decimalText(githubActorId), cursor);
+        cursor = ClaimMatcher.requireStringClaimFrom(payload, "event_name", _EXPECTED_EVENT, cursor);
+        // Final claim: there is no subsequent scan to seed, so the cursor is discarded.
+        // slither-disable-next-line unused-return
+        ClaimMatcher.requireStringClaimFrom(payload, "job_workflow_ref", workflowRef, cursor);
+    }
+
+    /**
+     * @dev Returns the decimal form of `value`.
+     *
+     * Equivalent to `Strings.toString`, which writes one bounds-checked byte at a time through a
+     * `bytes` index. Two conversions occur on the registration path.
+     * `testFuzz_DecimalTextMatchesStrings` compares the two implementations.
+     */
+    function _decimalText(uint256 value) internal pure virtual returns (string memory text) {
+        assembly ("memory-safe") {
+            let buffer := mload(0x40)
+            // 32 for the length word and 78 for the widest uint256, rounded to whole words.
+            let end := add(buffer, 0x80)
+            let cursor := end
+
+            for {} 1 {} {
+                cursor := sub(cursor, 1)
+                mstore8(cursor, add(48, mod(value, 10)))
+                value := div(value, 10)
+                if iszero(value) { break }
+            }
+
+            text := sub(cursor, 0x20)
+            mstore(text, sub(end, cursor))
+            mstore(0x40, end)
+        }
     }
 
     /**
      * @dev Returns the lowercase `0x`-prefixed hex form of `wallet`.
      *
-     * Semantically `Strings.toHexString(uint160(wallet), 20)`. That costs around 10.7k gas because
-     * it writes one bounds-checked byte at a time through a `bytes` index, and this sits on the hot
-     * path of the only state-changing function this contract has, so the 42 bytes are written
-     * directly instead. A differential fuzz test pins it against {Strings}.
+     * Equivalent to `Strings.toHexString(uint160(wallet), 20)`, which costs roughly 10.7k gas
+     * because it writes one bounds-checked byte at a time through a `bytes` index.
+     *
+     * No longer called by this contract: {audienceOf} writes the address, separators and both
+     * numbers in a single pass. It is retained as the reference implementation that
+     * `testFuzz_AudienceIsTheConcatenation` compares against. solc removes unreferenced internal
+     * functions, so the deployed bytecode is unchanged by its presence.
      */
+    // slither-disable-next-line dead-code
     function _addressText(address wallet) internal pure virtual returns (string memory text) {
         assembly ("memory-safe") {
             text := mload(0x40)
@@ -421,13 +502,13 @@ contract RIK is ERC721, Ownable2Step {
             mstore(text, 42)
 
             let ptr := add(text, 0x20)
-            // Clear the second word first, so the 22 bytes past the end of the string are never
-            // whatever the allocator happened to be sitting on.
+            // Clear the second word first so the 22 bytes past the end of the string are zero
+            // rather than whatever the allocator last left there.
             mstore(add(ptr, 0x20), 0)
             mstore8(ptr, 0x30) // "0"
             mstore8(add(ptr, 1), 0x78) // "x"
 
-            // Nibbles are emitted least significant first, so the cursor walks backwards.
+            // Nibbles are emitted least significant first, so the cursor moves backwards.
             let value := wallet
             for { let i := 41 } gt(i, 1) { i := sub(i, 1) } {
                 mstore8(add(ptr, i), byte(and(value, 0xf), _HEX_DIGITS))
@@ -440,15 +521,15 @@ contract RIK is ERC721, Ownable2Step {
      * @dev Renders on-chain metadata as a base64 JSON data URI.
      *
      * Every interpolated value is a decimal number produced by {Strings}, so the JSON cannot be
-     * broken out of. Keep it that way: a repository name or owner login would need escaping.
+     * escaped out of. Interpolating a repository name or owner login would require escaping.
      */
     function _render(uint256 tokenId) internal view virtual returns (string memory) {
         Repo memory repo = _repos[tokenId];
         string memory id = Strings.toString(tokenId);
         string memory ownerId = Strings.toString(uint256(repo.githubOwnerId));
 
-        // Built in two halves. One long concatenation exhausts the stack once the optimizer is
-        // enabled without via-ir, which would make the build configuration a trap for later.
+        // Built in two halves: a single long concatenation exhausts the stack when the optimizer is
+        // enabled without via-ir.
         string memory head = string.concat(
             '{"name":"RIK #',
             id,
