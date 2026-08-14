@@ -4,14 +4,14 @@ EVM contracts that bind a GitHub repository to a wallet through a GitHub Actions
 whoever holds that binding launch a token market for the repository and collect its trading fees.
 
 A repository's key is a **RIK**, an ERC-721 whose token id is the repository's numeric GitHub id.
-Holding it means holding the repository's market and its royalties, and it is tradeable, so the
-whole thing can change hands as one asset.
+Holding it conveys control of the repository's market and its royalties. Because the RIK is
+transferable, these rights can be transferred together as one asset.
 
 ## Contracts
 
 | Contract | What it is |
 | --- | --- |
-| [`src/RIK.sol`](src/RIK.sol) | Repository Identity Key. Verifies a GitHub Actions OIDC proof and mints one key per repository, forever. On-chain metadata. Its owner pins the attestation source and nothing else, which still makes it the most powerful role here. |
+| [`src/RIK.sol`](src/RIK.sol) | Repository Identity Key. Verifies a GitHub Actions OIDC proof and allows a key for each repository id to be minted only once. Provides on-chain metadata. Its owner controls the attestation source, making the owner the system's most privileged role. |
 | [`src/RIKLauncher.sol`](src/RIKLauncher.sol) | Creates the one market a repository is allowed, on behalf of its key holder, through the Doppler Airlock. |
 | [`src/RIKRoyaltySplitter.sol`](src/RIKRoyaltySplitter.sol) | Accrues that market's fees and pays them to whoever currently holds the key. |
 
@@ -28,9 +28,10 @@ Open an issue here, titled with the repository and the wallet that should hold i
 octocat/Hello-World 0x1111111111111111111111111111111111111111
 ```
 
-No commit to your own repository, no installation, and no ETH: a workflow here verifies that you
-control the repository, requests a signed proof from GitHub, and a relayer submits the transaction.
-The result is posted back as a comment on the issue.
+Registration does not require a commit to the repository, a local installation, or ETH from the
+claimant. A workflow in this repository verifies the claimant's control of the repository, requests
+a signed proof from GitHub, and uses a relayer to submit the transaction. The result is posted as a
+comment on the issue.
 
 ## Proof model
 
@@ -38,19 +39,18 @@ Attestation happens in *this* repository, so the OIDC token's `repository_id` na
 `actor_id` names whoever opened the issue. Neither says anything about the repository being claimed.
 
 Every claim in an Actions OIDC token is set by GitHub except one: **`aud` is an arbitrary string
-chosen by the workflow**. It is therefore the only channel a reviewed workflow has to speak to the
-chain, and it carries the whole claim — `"<wallet>:<repositoryId>:<ownerId>"`. The other four checks
-exist to prove that string came from reviewed code: `repository_id` and `job_workflow_ref` pin the
-attestation source, `event_name` pins the `issues` trigger, and `actor_id` names the account being
-credited. Dropping any one of the five reintroduces impersonation, and every one has a negative test
-that says so.
+chosen by the workflow**. It is therefore the only workflow-controlled value passed to the contract
+and encodes the complete claim: `"<wallet>:<repositoryId>:<ownerId>"`. The other four checks verify
+the source of that value: `repository_id` and `job_workflow_ref` pin the attestation source,
+`event_name` pins the `issues` trigger, and `actor_id` names the account being credited. Omitting any
+of the five checks reintroduces an impersonation risk; each check has a corresponding negative test.
 
-The contract cannot check "does this account control that repository", and does not try. The
-workflow does, in three tiers: **you own it** (public data, automatic), **a GitHub App confirms you
-hold `admin`** (one `Metadata: read` permission, and the only tier that works for private
-repositories), or **an admin adds a one-off challenge topic** (topics require admin, and it can be
-removed straight afterwards). [ATTESTATION.md](ATTESTATION.md) is the design record: why these
-three, what was rejected, and what the model costs.
+The contract cannot determine whether an account controls a repository. The workflow performs this
+check in three tiers: **repository ownership** (public data, automatic), **GitHub App confirmation of
+`admin` access** (one `Metadata: read` permission, and the only tier that supports private
+repositories), or **an administrator-provided one-time challenge topic** (topics require admin
+access and can be removed immediately after verification). [ATTESTATION.md](ATTESTATION.md) records
+the rationale for these tiers, the alternatives considered, and the model's costs.
 
 `register` is permissionless: the proof names its own beneficiary through `aud`, so a relayer can
 pay the gas without being able to redirect the key.
@@ -66,10 +66,10 @@ pay the gas without being able to redirect the key.
 | Static analysis | `slither .`, at zero findings |
 | Operator path | `./smoke-test.sh` against a local anvil |
 
-The splitter is a conduit, so its central invariant is that outstanding buckets plus amounts already
-paid equal the total ever credited, under any interleaving of collections, transfers, payouts and
-owner sweeps. [SECURITY.md](SECURITY.md) records the threat model, what is assumed honest, and the
-rationale for each accepted static-analysis finding.
+The splitter transfers accrued fees to recipients. Its central invariant is that outstanding buckets
+plus amounts already paid equal the total amount credited, under any interleaving of collections,
+transfers, payouts and owner sweeps. [SECURITY.md](SECURITY.md) records the threat model, what is
+assumed honest, and the rationale for each accepted static-analysis finding.
 
 ## Commands
 
@@ -80,7 +80,7 @@ forge build --sizes
 forge test -vvv
 forge test --gas-report
 
-# The long version: many more fuzz inputs, much deeper invariant campaigns.
+# Run extended fuzzing and invariant campaigns.
 FOUNDRY_PROFILE=deep forge test
 
 # Static analysis. Builds without test artifacts, so clean afterwards.
@@ -112,13 +112,14 @@ is never written to `.market.yml`.
 
 ## Choosing a network
 
-`MARKET_RPC_URL` and `MARKET_CHAIN_ID` override the recorded endpoint and pin the chain, so
-rehearsing on a testnet is a variable rather than an edit to the file that also records a live
-deployment. `--rpc-url` and `--chain-id` do the same per command.
+`MARKET_RPC_URL` and `MARKET_CHAIN_ID` override the recorded endpoint and expected chain. They allow
+testnet use without modifying the file that records the live deployment. `--rpc-url` and
+`--chain-id` provide the same overrides for an individual command.
 
-The chain id is a guard rather than a setting: an endpoint's chain cannot be chosen. Declaring it
-makes acting on the wrong network an error. A deploy aimed at a chain that is not present is refused
-before anything is broadcast, as is any command that spends gas. Reads are not gated.
+The chain id acts as a validation constraint rather than a configuration setting because the
+endpoint determines the chain. Declaring it causes commands to fail when the endpoint uses a different
+network. Deployment and other state-changing commands perform this validation before broadcasting;
+read-only commands do not.
 
 ```shell
 export MARKET_RPC_URL=https://sepolia.base.org
@@ -138,8 +139,8 @@ forge create --rpc-url "$MARKET_RPC_URL" --private-key "$PRIVATE_KEY" --broadcas
 # then sync GitHub's JWKS into it — see the identity repository's sync-github-keys.sh
 ```
 
-`market deploy` rejects a verifier address with no code, so omitting this step fails immediately
-rather than producing a registry that rejects every proof.
+`market deploy` checks that the verifier address contains code and rejects the deployment if it does
+not.
 
 ## Launching a market
 
@@ -165,9 +166,9 @@ struct InitData {
 }
 ```
 
-`beneficiaries` is the field that matters here. Doppler fixes it when the pool is created and there
-is no way to add an entry afterwards, so a market launched without the splitter in the list would
-accrue nothing for the repository, permanently. `RIKLauncher` therefore reads
+The `beneficiaries` field determines fee allocation. Doppler fixes it when the pool is created and
+does not provide a way to add an entry afterwards, so a market launched without the splitter in the
+list would never accrue fees for the repository. `RIKLauncher` therefore reads
 `getShares(poolId, splitter)` after creation and reverts with `SplitterNotBeneficiary` if it is zero.
 
 Doppler's own rules, enforced by `storeBeneficiaries`:
@@ -177,8 +178,8 @@ Doppler's own rules, enforced by `storeBeneficiaries`:
 - `airlock.owner()` must be included with at least `1e18 / 20` (5%)
 - an empty array stores no beneficiaries at all, which this launcher rejects
 
-So a minimal list has three entries — the Doppler protocol owner, the splitter, and whoever else the
-launcher wants — sorted by address:
+A minimal list therefore has two entries—the Doppler protocol owner and the splitter—sorted by
+address:
 
 ```solidity
 address splitter = address(launcher.splitter());
@@ -198,15 +199,16 @@ params.numeraire = <an ERC20>;                                       // not addr
 `numeraire` must be an ERC20. Fees are released as ERC20 transfers, and the splitter cannot hold
 native value, so `launch` rejects `address(0)` with `NativeNumeraireUnsupported`.
 
-Note that `Airlock.create` returns the **asset** address in its `pool` slot for a V4 initializer,
-because Uniswap V4 pools have no address. The pool is identified by the `PoolKey` the initializer
-stores against the asset, which is what the splitter reads back when collecting.
+For a V4 initializer, `Airlock.create` returns the **asset** address in its `pool` slot because
+Uniswap V4 pools do not have individual addresses. The pool is identified by the `PoolKey` that the
+initializer stores against the asset, which is what the splitter reads back when collecting.
 
 ## External addresses
 
-The Doppler Airlock `--airlock` points at. It is immutable in both the launcher and the splitter, so
-a wrong value cannot be corrected after deployment, and it fails quietly rather than loudly: markets
-still launch, and the fees simply never arrive anywhere the splitter can collect them.
+The `--airlock` option specifies the Doppler Airlock address. This address is immutable in both the
+launcher and the splitter, so an incorrect value cannot be corrected after deployment. An incorrect
+address may not cause market launches to revert, but it prevents fees from reaching a location where
+the splitter can collect them.
 
 | Network | Airlock |
 | --- | --- |
@@ -221,7 +223,8 @@ register the splitter as a fee beneficiary in `poolInitializerData`; `RIKLaunche
 does not, because beneficiaries are fixed when the pool is created.
 
 Source: [Doppler's contract addresses](https://docs.doppler.lol/resources/contract-addresses). Verify
-before relying on either — Doppler redeploys, and this table can go stale:
+the addresses before use because Doppler may redeploy these contracts and this table may become
+outdated:
 
 ```shell
 cast code <airlock> --rpc-url "$MARKET_RPC_URL"                        # must not be 0x
@@ -229,14 +232,15 @@ cast call <airlock> "getIntegratorFees(address,address)(uint256)" \
   0x0000000000000000000000000000000000000001 <token> --rpc-url "$MARKET_RPC_URL"
 ```
 
-The second call is the one that matters: it is the interface `RIKRoyaltySplitter` depends on, and an
-address with code but a different ABI is the failure this catches.
+The second call verifies the interface required by `RIKRoyaltySplitter` and detects an address that
+contains contract code but exposes an incompatible ABI.
 
 ## Notes for contributors
 
-Read [AGENTS.md](AGENTS.md) before making changes. It records the decisions that are load-bearing:
-why the event pin exists, why the key is transferable but registers only once, why the splitter never
-accepts a repository id from its caller, and which files are vendored and must not be edited here.
+Read [AGENTS.md](AGENTS.md) before making changes. It records important design constraints, including
+why the event pin exists, why the key is transferable but can be registered only once, why the
+splitter never accepts a repository id from its caller, and which files are vendored and must not be
+edited here.
 
 ## Licence
 
