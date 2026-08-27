@@ -148,6 +148,15 @@ jobs:
       - name: Install Foundry
         if: steps.control.outputs.status == 'ok'
         uses: foundry-rs/foundry-toolchain@v1
+        with:
+          # Pinned rather than tracking `stable`. Foundry 1.8.0 resolves the endpoint's network
+          # family before it runs anything, and probes `anvil_nodeInfo` to do it. Alchemy rejects
+          # that method with JSON-RPC `-32600` over HTTP 400, which 1.8.0 treats as fatal, so every
+          # `cast` call below started failing with "failed to determine network family from
+          # endpoint" on the day 1.8.0 shipped. Accepting that reply landed upstream in
+          # foundry-rs/foundry#16414, after 1.8.0 was cut: move this pin to the first release that
+          # carries it.
+          version: v1.7.1
 
       - name: Mint the proof and register
         id: register
