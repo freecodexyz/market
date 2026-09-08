@@ -169,8 +169,10 @@ contract RIKRoyaltySplitter is IRIKRoyaltySplitter, Ownable2Step, ReentrancyGuar
 
         // The return value reports what was harvested into the pool's cumulative accounting, which
         // is not the amount released to this contract, so the balance delta is measured instead.
+        // forge-lint: disable-start(unused-return)
         // slither-disable-next-line unused-return
         initializer.collectFees(poolIdOf(poolKey));
+        // forge-lint: disable-end(unused-return)
 
         // Measured rather than reported, so that a misreporting initializer or a fee-on-transfer
         // token cannot create a claim this contract cannot pay. The subtraction is left checked: a
@@ -246,8 +248,8 @@ contract RIKRoyaltySplitter is IRIKRoyaltySplitter, Ownable2Step, ReentrancyGuar
     function collectIntegratorFees(address token, address to)
         external
         virtual
-        onlyOwner
         nonReentrant
+        onlyOwner
         returns (uint256 amount)
     {
         if (to == address(0)) revert InvalidRecipient();
@@ -336,6 +338,9 @@ contract RIKRoyaltySplitter is IRIKRoyaltySplitter, Ownable2Step, ReentrancyGuar
         if (amount == 0) return;
 
         _claimable[githubRepoId][token] += amount;
+        // The credit is the difference the collect call made, so both the write and the event it
+        // announces are necessarily post-call. The only caller, `collectPoolFees`, is guarded.
+        // forge-lint: disable-next-line(reentrancy-events)
         emit FeesAccrued(githubRepoId, token, amount);
     }
 }

@@ -83,6 +83,20 @@ Everything else slither reports is accepted in place with a `slither-disable-nex
 | `unused-return` | `RIK._verifyClaims` | The last claim has no successor, so the cursor it returns has nothing to seed. |
 | `dead-code` | `RIK._addressText` | Retained as the readable reference `audienceOf` is fuzzed against. Nothing in `src/` calls it and solc drops it, so the deployed bytecode is byte-for-byte identical with and without it. |
 
+`forge lint` is pointed at the same files, through `ignore` in `foundry.toml`: `test/`, `script/` and the three vendored sources. Foundry 1.8 gave the linter its own copy of several slither detectors, and they are aimed at deployed code rather than at mocks and harnesses. What it still reports in `src/` is fixed or accepted in place with a `forge-lint: disable-next-line` — or a `disable-start`/`disable-end` pair where the statement spans several lines, or where slither's own directive has to keep the line directly above the statement:
+
+| Finding | Where | Why it is accepted |
+| --- | --- | --- |
+| `incorrect-shift` | `ClaimMatcher.charBitmap` | Yul takes the shift amount first, so `shl(byte(n, w), 1)` sets bit `byte(n, w)` of a one-bit mask. The literal in the value position reads to the linter as a swapped pair; there is nothing to swap. |
+| `encode-packed-collision` | `ClaimMatcher.requireStringClaimFrom` | The result is the byte string searched for in the payload, never a hash preimage. What would disambiguate the two dynamic arguments is the JSON quoting being interpolated, and the encoder escaping that the match already rests on removes a `"` from either one. |
+| `reentrancy-events` | `RIK._register` | The only external call it can follow is the JWT verifier, and a registration cannot be announced before its proof is checked. Every state change precedes the mint, so a nested registration of the same repository reverts with `AlreadyRegistered`. |
+| `reentrancy-events` | `RIKLauncher.launch` | The asset and the pool are only known once the Airlock has answered. Guarded. |
+| `reentrancy-events` | `RIKRoyaltySplitter._accrue` | The credit is the difference the collect call made, so both the write and its event are necessarily post-call. Every caller is guarded. |
+| `unused-return`, `reentrancy-no-eth` | `RIKLauncher._create` | As above for slither. |
+| `unused-return` | `RIKRoyaltySplitter.collectPoolFees` | As above for slither. |
+
+The one thing the linter found rather than mis-read was `non-reentrant-not-first` on `RIKRoyaltySplitter.collectIntegratorFees`, where `nonReentrant` sat behind `onlyOwner`. It was reordered rather than accepted. Note that these lint ids are new in Foundry 1.8, so an older `forge` reports them as unknown and `forge lint --deny warnings` fails on the directives themselves; CI installs `stable`, and a local toolchain should match it.
+
 Note that slither builds with `--skip ./test/**`, which leaves the Foundry cache without test artifacts. Run `forge clean` before `forge test` afterwards, or run the two in separate jobs as CI does.
 
 ## Doppler integration

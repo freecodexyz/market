@@ -129,6 +129,9 @@ contract RIKLauncher is Context, ReentrancyGuardTransient {
         address initializer = params.poolInitializer;
         if (!_splitterIsBeneficiary(initializer, asset)) revert SplitterNotBeneficiary(githubRepoId, initializer);
 
+        // The asset and the pool are only known once the Airlock has answered, so the launch cannot
+        // be announced before that call. `launch` is `nonReentrant`.
+        // forge-lint: disable-next-line(reentrancy-events)
         emit MarketLaunched(githubRepoId, asset, caller, pool);
 
         _splitter.registerMarket(asset, initializer, githubRepoId);
@@ -187,8 +190,12 @@ contract RIKLauncher is Context, ReentrancyGuardTransient {
         forced.integrator = address(_splitter);
 
         // Governance, timelock and migration pool are not used here; callers read them from the
-        // Airlock's own events.
+        // Airlock's own events. Recording the asset is necessarily post-call for the reason given
+        // on `launch`, and the slot is reserved before the call so exclusivity does not depend on
+        // the guard.
+        // forge-lint: disable-start(unused-return, reentrancy-no-eth)
         // slither-disable-next-line unused-return
         (asset, pool,,,) = _airlock.create(forced);
+        // forge-lint: disable-end(unused-return, reentrancy-no-eth)
     }
 }

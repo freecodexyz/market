@@ -397,6 +397,11 @@ contract RIK is ERC721, Ownable2Step {
             registeredAt: registeredAt
         });
 
+        // The only external call this can follow is the JWT verifier, and a registration cannot be
+        // announced before its proof is checked. `register` is deliberately unguarded so that a
+        // receiver hook may register a *different* repository; every state change above precedes
+        // the mint, so a nested registration of this one reverts with {AlreadyRegistered}.
+        // forge-lint: disable-start(reentrancy-events)
         emit RepoRegistered(
             githubRepoId,
             wallet,
@@ -407,6 +412,7 @@ contract RIK is ERC721, Ownable2Step {
             uint64(githubActorId),
             registeredAt
         );
+        // forge-lint: disable-end(reentrancy-events)
 
         // `_safeMint` rather than `_mint`: the key is transferable and carries the repository's
         // royalties, so minting into a contract that cannot transfer an ERC-721 would strand them

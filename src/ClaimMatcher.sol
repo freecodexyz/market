@@ -104,6 +104,11 @@ library ClaimMatcher {
             // it may also be set. Only extra bits can result, never missing ones, and an extra bit
             // makes the scan advance one position instead of many. A missing bit would allow a
             // position to be skipped incorrectly, so the map must never be narrowed.
+            //
+            // Yul takes the shift amount first, so every `shl(byte(n, w), 1)` below sets bit
+            // `byte(n, w)` of a one-bit mask. The linter reads a literal in the value position as a
+            // swapped pair; there is nothing to swap.
+            // forge-lint: disable-start(incorrect-shift)
             function charBitmap(nPtr, nLen) -> bm {
                 bm := 0
                 for { let i := 0 } lt(i, nLen) { i := add(i, 0x20) } {
@@ -142,6 +147,7 @@ library ClaimMatcher {
                     bm := or(bm, shl(byte(31, w), 1))
                 }
             }
+            // forge-lint: disable-end(incorrect-shift)
 
             // Scans candidate positions `from..to` inclusive. Returns the match position plus one,
             // so that zero denotes "absent" without colliding with a match at position zero.
@@ -225,6 +231,11 @@ library ClaimMatcher {
         pure
         returns (uint256 next)
     {
+        // Nothing hashes this: it is the byte string searched for in `payload`. What separates the
+        // two dynamic arguments is the JSON quoting interpolated between them, and a raw `"` cannot
+        // appear inside either one — the encoder escaping that this match already rests on is what
+        // removes it.
+        // forge-lint: disable-next-line(encode-packed-collision)
         bytes memory needle = abi.encodePacked('"', bytes(key), '":"', bytes(expectedValue), '"');
 
         int256 position = indexOfFrom(payload, needle, start);

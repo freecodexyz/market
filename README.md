@@ -91,6 +91,10 @@ anvil --silent
 ./smoke-test.sh
 ```
 
+`forge lint` needs Foundry 1.8 or newer: the lint ids the accepted findings in `src/` name were
+added there, and an older toolchain rejects the directives themselves as unknown ids. CI installs
+`stable`.
+
 The CLI is Ruby 3.2, standard library only, no bundler:
 
 ```shell
