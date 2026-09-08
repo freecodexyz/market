@@ -36,6 +36,8 @@ struct PoolKey {
  *      | `collectFees(bytes32)`       | `0x817db73b` |
  *
  *      All three are present in both `DopplerHookInitializer` and `RehypeDopplerHookInitializer`.
+ *      The standard and decay multicurve initializers share these selectors, but their
+ *      `getState` return layout differs. Consumers read pool keys through {DopplerPoolKey}.
  *      See AGENTS.md for how to re-check them.
  */
 interface IDopplerHookInitializer {

@@ -81,7 +81,6 @@ Everything else slither reports is accepted in place with a `slither-disable-nex
 | `unused-return` | `RIKLauncher._create` | Governance, timelock and migration pool are the Airlock's business; callers read them from its own events. |
 | `incorrect-equality` | `RIKRoyaltySplitter._accrue` | The comparison is against a measured delta, not a balance, and only decides whether to skip a no-op write. |
 | `unused-return` | `RIK._verifyClaims` | The last claim has no successor, so the cursor it returns has nothing to seed. |
-| `unused-return` | `RIKLauncher._splitterIsBeneficiary`, `RIKRoyaltySplitter.collectPoolFees` | Only `poolKey` is read from Doppler's `getState`; the other members of `PoolState` describe the sale rather than the pool's identity. |
 | `dead-code` | `RIK._addressText` | Retained as the readable reference `audienceOf` is fuzzed against. Nothing in `src/` calls it and solc drops it, so the deployed bytecode is byte-for-byte identical with and without it. |
 
 Note that slither builds with `--skip ./test/**`, which leaves the Foundry cache without test artifacts. Run `forge clean` before `forge test` afterwards, or run the two in separate jobs as CI does.
@@ -100,6 +99,14 @@ against [Doppler's source](https://github.com/whetstoneresearch/doppler):
 | `IDopplerHookInitializer.getShares` | as above | selector `0x5ebb58fb` present |
 | `IDopplerHookInitializer.collectFees` | as above | selector `0x817db73b` present; returns `(uint128, uint128)` |
 | Pool id derivation | `Uniswap/v4-core` | `PoolIdLibrary.toId` is `keccak256(abi.encode(poolKey))` over five slots |
+
+`getState(address)` also exists on the standard and decay multicurve initializers, but those
+return `(address, uint8, PoolKey, int24)`: eight static ABI words. Hook initializers return a
+seven-element tuple with dynamic graduation calldata. A matching selector does not imply a
+matching return layout. `DopplerPoolKey` is the shared reader used for launch authorization and
+fee collection; it selects the multicurve layout by its exact 256-byte length and otherwise
+uses the hook ABI decoder. Truncated or noncanonical pool keys revert. Fuzz tests exercise both
+layouts, arbitrary graduation calldata, truncated multicurve states and invalid key fields.
 
 Two properties of Doppler's fee model are load-bearing and are covered by tests written against a
 mock that reproduces `FeesManager` rather than approximating it:

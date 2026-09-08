@@ -8,6 +8,7 @@ import {ReentrancyGuardTransient} from "@openzeppelin/contracts/utils/Reentrancy
 
 import {IAirlock} from "./IAirlock.sol";
 import {IDopplerHookInitializer, PoolKey} from "./IDopplerHookInitializer.sol";
+import {DopplerPoolKey} from "./DopplerPoolKey.sol";
 import {IRIKRoyaltySplitter} from "./IRIKRoyaltySplitter.sol";
 
 /**
@@ -140,10 +141,7 @@ contract RIKLauncher is Context, ReentrancyGuardTransient {
      * Doppler's own state rather than trusting anything the caller supplied.
      */
     function _splitterIsBeneficiary(address initializer, address asset) internal view virtual returns (bool) {
-        // Only `poolKey` is needed; the remaining members of Doppler's `PoolState` describe the
-        // sale rather than the pool's identity.
-        // slither-disable-next-line unused-return
-        (,,,,, PoolKey memory poolKey,) = IDopplerHookInitializer(initializer).getState(asset);
+        PoolKey memory poolKey = DopplerPoolKey.read(initializer, asset);
         bytes32 poolId = keccak256(abi.encode(poolKey));
 
         return IDopplerHookInitializer(initializer).getShares(poolId, address(_splitter)) != 0;

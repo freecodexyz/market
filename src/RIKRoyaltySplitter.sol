@@ -11,6 +11,7 @@ import {ReentrancyGuardTransient} from "@openzeppelin/contracts/utils/Reentrancy
 
 import {IAirlock} from "./IAirlock.sol";
 import {IDopplerHookInitializer, PoolKey} from "./IDopplerHookInitializer.sol";
+import {DopplerPoolKey} from "./DopplerPoolKey.sol";
 import {IRIKRoyaltySplitter} from "./IRIKRoyaltySplitter.sol";
 
 /**
@@ -158,10 +159,7 @@ contract RIKRoyaltySplitter is IRIKRoyaltySplitter, Ownable2Step, ReentrancyGuar
         if (market.githubRepoId == 0) revert UnknownMarket(asset);
 
         IDopplerHookInitializer initializer = IDopplerHookInitializer(market.initializer);
-        // Only `poolKey` is needed; the remaining members of Doppler's `PoolState` describe the
-        // sale rather than the pool's identity.
-        // slither-disable-next-line unused-return
-        (,,,,, PoolKey memory poolKey,) = initializer.getState(asset);
+        PoolKey memory poolKey = DopplerPoolKey.read(market.initializer, asset);
 
         address token0 = poolKey.currency0;
         address token1 = poolKey.currency1;

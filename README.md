@@ -148,7 +148,8 @@ not.
 `integrator`, which it overwrites with the splitter. The caller supplies everything else, and two
 fields decide whether the repository will ever be paid.
 
-`poolInitializerData` is an ABI-encoded `InitData` for the chosen initializer:
+`poolInitializerData` must use the chosen initializer's encoding. For `DopplerHookInitializer`,
+the encoded `InitData` has this shape:
 
 ```solidity
 struct Curve { int24 tickLower; int24 tickUpper; uint16 numPositions; uint256 shares; }
@@ -165,6 +166,11 @@ struct InitData {
     bytes graduationDopplerHookCalldata;
 }
 ```
+
+Standard and decay multicurve initializers use different creation data and a different
+`getState(address)` return layout. Use their matching SDK encoder. The launcher and splitter
+share `DopplerPoolKey` to read the pool identity from either initializer family; the same
+`getState` selector does not imply the same return ABI.
 
 The `beneficiaries` field determines fee allocation. Doppler fixes it when the pool is created and
 does not provide a way to add an entry afterwards, so a market launched without the splitter in the
