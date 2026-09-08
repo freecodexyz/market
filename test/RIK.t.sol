@@ -551,8 +551,11 @@ contract RIK_T is OidcFixture {
     {
         vm.assume(repoId != 0 && ownerId != 0 && actorId != 0);
         vm.assume(wallet != address(0));
-        // Precompiles and the test contract itself are poor ERC-721 receivers under `_safeMint`.
+        // Precompiles are poor ERC-721 receivers under `_safeMint`, and so is anything with code:
+        // the fuzzer draws from addresses it has seen, which includes this test contract and the
+        // deterministic CREATE2 deployer, and neither implements `onERC721Received`.
         vm.assume(uint160(wallet) > 0x0a);
+        vm.assume(wallet.code.length == 0);
 
         Fixture memory f = _ready("sample-jwt.json", repoId, ownerId, actorId, wallet);
         _register(f, repoId, ownerId, actorId, wallet);
