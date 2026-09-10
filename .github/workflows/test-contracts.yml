@@ -58,10 +58,15 @@ jobs:
       - name: Run Forge fmt
         run: forge fmt --check
 
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.2"
+
       - name: Check workflow run blocks
         run: |
           ruby .github/scripts/check-workflows.rb
           ruby .github/scripts/check-workflows.test.rb
+          ruby tools/market/config.test.rb
 
       - name: Run Forge lint
         run: forge lint --deny warnings

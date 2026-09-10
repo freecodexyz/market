@@ -26,7 +26,13 @@ concurrency:
 
 jobs:
   register:
-    name: Prove and register
+    name: Register on ${{ matrix.chain.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        chain:
+          - { name: Base, id: 8453, prefix: "" }
+          - { name: Robinhood, id: 4663, prefix: "ROBINHOOD_" }
     runs-on: ubuntu-latest
     steps:
       # Only the helper scripts are needed: `decode-jwt.mjs` on every registration, and
@@ -47,7 +53,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          # "<owner>/<repo> <0xwallet> [8453|4663]"; legacy titles select Base.
+          # Always register on both chains. Accept the old optional chain field for client compatibility.
           request="$(printf '%s' "$ISSUE_TITLE" | tr -s '[:space:]' ' ' | sed 's/^ //; s/ $//')"
           read -r slug wallet chain_id extra <<< "$request"
           wallet="$(printf '%s' "$wallet" | tr '[:upper:]' '[:lower:]')"
@@ -70,7 +76,6 @@ jobs:
             exit 0
           fi
 
-          echo "chain_id=$chain_id" >> "$GITHUB_OUTPUT"
           echo "status=ok" >> "$GITHUB_OUTPUT"
           echo "slug=$slug" >> "$GITHUB_OUTPUT"
           echo "wallet=$wallet" >> "$GITHUB_OUTPUT"
@@ -170,10 +175,10 @@ jobs:
         if: steps.control.outputs.status == 'ok'
         env:
           # Select variable names, so missing Robinhood configuration cannot fall back to Base.
-          CHAIN_ID: ${{ steps.parse.outputs.chain_id }}
-          RIK_ADDRESS: ${{ vars[format('FCF_{0}RIK_ADDRESS', steps.parse.outputs.chain_id == '4663' && 'ROBINHOOD_' || '')] }}
-          RPC_URL: ${{ vars[format('FCF_{0}RPC_URL', steps.parse.outputs.chain_id == '4663' && 'ROBINHOOD_' || '')] }}
-          REGISTRAR_PRIVATE_KEY: ${{ secrets[format('FCF_{0}REGISTRAR_PRIVATE_KEY', steps.parse.outputs.chain_id == '4663' && 'ROBINHOOD_' || '')] }}
+          CHAIN_ID: ${{ matrix.chain.id }}
+          RIK_ADDRESS: ${{ vars[format('FCF_{0}RIK_ADDRESS', matrix.chain.prefix)] }}
+          RPC_URL: ${{ vars[format('FCF_{0}RPC_URL', matrix.chain.prefix)] }}
+          REGISTRAR_PRIVATE_KEY: ${{ secrets[format('FCF_{0}REGISTRAR_PRIVATE_KEY', matrix.chain.prefix)] }}
           WALLET: ${{ steps.parse.outputs.wallet }}
           REPO_ID: ${{ steps.repo.outputs.repo_id }}
           OWNER_ID: ${{ steps.repo.outputs.owner_id }}
@@ -254,7 +259,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           ISSUE: ${{ github.event.issue.number }}
-          CHAIN_ID: ${{ steps.parse.outputs.chain_id }}
+          CHAIN_ID: ${{ matrix.chain.id }}
           PARSE_STATUS: ${{ steps.parse.outputs.status }}
           REPO_STATUS: ${{ steps.repo.outputs.status }}
           CONTROL_STATUS: ${{ steps.control.outputs.status }}
@@ -290,11 +295,11 @@ jobs:
           elif [ "$REGISTER_STATUS" = "wrong-chain" ]; then
             body="The configured RPC does not serve chain $CHAIN_ID. Nothing was submitted. Correct the registrar configuration before retrying."
           elif [ "$REGISTER_STATUS" = "rejected" ]; then
-            body=$(printf 'Control confirmed via `%s`, but the chain rejected the registration:\n\n```\n%s\n```' "$CONTROL_METHOD" "$REGISTER_REASON")
+            body=$(printf 'Control confirmed via `%s`, but chain %s rejected the registration:\n\n```\n%s\n```' "$CONTROL_METHOD" "$CHAIN_ID" "$REGISTER_REASON")
           elif [ "$REGISTER_STATUS" = "ok" ]; then
             body="Registered \`$SLUG\` to \`$WALLET\`, proven via \`$CONTROL_METHOD\` on chain $CHAIN_ID. Transaction: \`$TX\`"
           else
-            body="Something went wrong before the registration ran. Check the workflow logs."
+            body="Something went wrong before registration on chain $CHAIN_ID ran. Check the workflow logs."
           fi
 
           gh issue comment "$ISSUE" --repo "$GITHUB_REPOSITORY" --body "$body"

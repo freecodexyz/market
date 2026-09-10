@@ -1,0 +1,13 @@
+# Written by bin/market. Safe to commit only if the endpoints are public.
+rpc_url: https://rpc.mainnet.chain.robinhood.com
+chain_id: 4663
+verifier: '0xf696da98df236a36536e9385daf05d196579612b'
+airlock: '0xeb7C034704eF8Dcd2D32324c1545f62fB4aD0862'
+rik: '0x4b99c819501702e104f06a3864473fcafd177a54'
+launcher: '0xfcff77638aceb32e67d2c72f7fc05ea69d1fda60'
+splitter: '0x562101893626510c7e40920ec6a4c07a14358189'
+rik_owner: '0xE8134C7574469f4DdD807e456C4eF8De741F8eee'
+splitter_owner: '0xE8134C7574469f4DdD807e456C4eF8De741F8eee'
+attestation_repo_id: 1333448997
+job_workflow_ref: freecodexyz/market/.github/workflows/register-rik.yml@refs/heads/main
+deployed_at: 59654902

@@ -26,6 +26,7 @@ module Market
         royalty claim <repoId> <token>    withdraw a bucket as the current holder
 
       Options:
+        --config FILE              deployment record (default: #{Config::FILENAME})
         --rpc-url URL              RPC endpoint (deploy; remembered afterwards)
         --chain-id ID              the chain you mean; refuses to act on any other
         --verifier ADDRESS         deployed GithubOidcVerifier to trust (deploy)
@@ -93,6 +94,7 @@ module Market
 
     def parser
       OptionParser.new do |o|
+        o.on("--config FILE") { |value| options[:config_file] = value }
         o.on("--rpc-url URL") { |value| options[:rpc_url] = value }
         o.on("--chain-id ID") { |value| options[:chain_id] = value }
         o.on("--verifier ADDRESS") { |value| options[:verifier] = value }
@@ -167,7 +169,7 @@ module Market
     end
 
     def deployment
-      @deployment ||= Deployment.new(root: root, chain_id: options[:chain_id])
+      @deployment ||= Deployment.new(root: root, chain_id: options[:chain_id], config_file: options[:config_file])
     end
 
     def registry

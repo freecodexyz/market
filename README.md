@@ -116,6 +116,12 @@ is never written to `.market.yml`.
 
 ## Choosing a network
 
+Use `--config .market-robinhood.yml --chain-id 4663` on each command to keep Robinhood's
+record separate from the default Base record. `configure` uses `FCF_ROBINHOOD_` variables and
+secrets for Robinhood and preserves the existing Base names.
+Every registration issue attempts both chains independently. Resubmitting the same request
+can mint a missing counterpart even when the Base RIK already exists.
+
 `MARKET_RPC_URL` and `MARKET_CHAIN_ID` override the recorded endpoint and expected chain. They allow
 testnet use without modifying the file that records the live deployment. `--rpc-url` and
 `--chain-id` provide the same overrides for an individual command.

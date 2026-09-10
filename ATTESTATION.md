@@ -132,9 +132,11 @@ rather than a commit and leaves no artifact in the repository.
 
 ## Independent chain registries
 
-Registration titles accept an optional third field, `8453` (Base) or `4663` (Robinhood).
-A title without a chain retains its Base meaning. The workflow selects that chain's registrar
-configuration and checks the RPC chain id before requesting a proof or submitting a transaction.
+Every registration request runs independent Base (8453) and Robinhood (4663) jobs, even if one
+fails or the repository already has a RIK there. Resubmit an issue to mint a missing counterpart.
+Titles use `<owner>/<repo> <0xwallet>`; the former optional chain field is accepted for compatibility,
+but both chains are always attempted. Each job checks its RPC chain id before requesting a proof
+or submitting a transaction.
 Base uses `FCF_RIK_ADDRESS`, `FCF_RPC_URL`, and `FCF_REGISTRAR_PRIVATE_KEY`; Robinhood uses the
 corresponding `FCF_ROBINHOOD_` names. Missing Robinhood configuration never selects Base.
 

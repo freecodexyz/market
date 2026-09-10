@@ -27,9 +27,9 @@ module Market
     APP_ID_VARIABLE = "FCF_APP_ID"
     APP_KEY_SECRET = "FCF_APP_PRIVATE_KEY"
 
-    def initialize(root: Dir.pwd, chain_id: nil)
+    def initialize(root: Dir.pwd, chain_id: nil, config_file: nil)
       @root = root
-      @config = Config.load(root)
+      @config = Config.load(root, filename: config_file || Config::FILENAME)
       @github = GitHub.new(root: root)
       @chain_id_override = chain_id
 
@@ -100,7 +100,7 @@ module Market
 
       UI.heading "Deployment"
       if config.deployed?
-        UI.ok "recorded in #{Config::FILENAME}"
+        UI.ok "recorded in #{config.path}"
       elsif config.registry_deployed?
         UI.warn "registry deployed, market contracts missing; run market deploy"
       else
@@ -164,7 +164,7 @@ module Market
       UI.note "the splitter owner can sweep integrator fees; it cannot touch a repository's bucket"
 
       if recorded_chain && Integer(recorded_chain) != actual_chain
-        UI.warn "#{Config::FILENAME} records a deployment on #{Chain.describe(recorded_chain)}"
+        UI.warn "#{config.path} records a deployment on #{Chain.describe(recorded_chain)}"
         UI.note "continuing overwrites it with this one; the old addresses are only in git history"
       end
 
@@ -212,7 +212,7 @@ module Market
       config.save
 
       UI.heading "Saved"
-      UI.note "#{Config::FILENAME} updated. Next: market status, then market configure."
+      UI.note "#{config.path} updated. Next: market status, then market configure."
       unless config.rik_owner.to_s.casecmp?(deployer)
         UI.warn "ownership of RIK is pending: #{config.rik_owner} must call acceptOwnership"
         UI.note "until it does, the deployer key still controls the attestation source"
@@ -280,6 +280,7 @@ module Market
 
       UI.heading "Repository variables"
       VARIABLES.each do |name, field|
+        name = config.github_name(name)
         value = config.public_send(field)
         if value.to_s.empty?
           UI.warn "#{name} skipped, #{field} is unset"
@@ -299,13 +300,14 @@ module Market
       end
 
       UI.heading "Repository secrets"
-      key = registrar_key || ENV.fetch(REGISTRAR_SECRET, nil)
+      registrar_secret = config.github_name(REGISTRAR_SECRET)
+      key = registrar_key || ENV.fetch(registrar_secret, nil)
       if key.to_s.empty?
-        UI.warn "#{REGISTRAR_SECRET} skipped; pass --registrar-key or set it in the environment"
+        UI.warn "#{registrar_secret} skipped; pass --registrar-key or set it in the environment"
         UI.note "Only pays gas for registrations. Keep it funded, and hold nothing else with it."
       else
-        github.set_secret(REGISTRAR_SECRET, key) unless dry_run
-        UI.ok REGISTRAR_SECRET
+        github.set_secret(registrar_secret, key) unless dry_run
+        UI.ok registrar_secret
       end
 
       app_key = app_private_key || ENV.fetch(APP_KEY_SECRET, nil)

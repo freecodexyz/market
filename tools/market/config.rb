@@ -28,8 +28,8 @@ module Market
     attr_accessor(*FIELDS)
     attr_reader :path
 
-    def self.load(root)
-      path = File.join(root, FILENAME)
+    def self.load(root, filename: FILENAME)
+      path = File.expand_path(filename, root)
       stored = File.exist?(path) ? YAML.safe_load_file(path) || {} : {}
       new(path: path, **stored.transform_keys(&:to_sym).slice(*FIELDS))
     end
@@ -51,6 +51,15 @@ module Market
 
     def deployed?
       registry_deployed? && !launcher.to_s.empty? && !splitter.to_s.empty?
+    end
+
+    # Base keeps its existing names; Robinhood has an independent namespace.
+    def github_name(name)
+      case chain_id.to_i
+      when 8453 then name
+      when 4663 then name.sub(/\AFCF_/, "FCF_ROBINHOOD_")
+      else raise InvalidState, "GitHub configuration is unsupported for chain #{chain_id.inspect}"
+      end
     end
 
     def to_h
