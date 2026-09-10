@@ -129,3 +129,18 @@ rather than a commit and leaves no artifact in the repository.
 - **The workflow is load-bearing.** It is pinned by `job_workflow_ref`, so changing it requires an
   owner transaction, and it should be reviewed to the same standard as contract code.
 - **Registration remains once-only and the key remains transferable.** The market half is unchanged.
+
+## Independent chain registries
+
+Registration titles accept an optional third field, `8453` (Base) or `4663` (Robinhood).
+A title without a chain retains its Base meaning. The workflow selects that chain's registrar
+configuration and checks the RPC chain id before requesting a proof or submitting a transaction.
+Base uses `FCF_RIK_ADDRESS`, `FCF_RPC_URL`, and `FCF_REGISTRAR_PRIVATE_KEY`; Robinhood uses the
+corresponding `FCF_ROBINHOOD_` names. Missing Robinhood configuration never selects Base.
+
+Each chain has an independent RIK, launcher, splitter, and verifier deployment. Once-only
+registration and market exclusivity hold within each deployment. Registering the same GitHub
+repository once on each chain is an explicit product choice. Official clients consult both
+launchers and treat a market on either chain as satisfying the market requirement. Independent
+on-chain deployments cannot enforce that client convention against direct callers or simultaneous
+cross-chain submissions.

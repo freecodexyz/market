@@ -47,10 +47,11 @@ jobs:
         run: |
           set -euo pipefail
 
-          # "<owner>/<repo> <0xwallet>", whitespace-tolerant, case-insensitive on the address.
+          # "<owner>/<repo> <0xwallet> [8453|4663]"; legacy titles select Base.
           request="$(printf '%s' "$ISSUE_TITLE" | tr -s '[:space:]' ' ' | sed 's/^ //; s/ $//')"
-          slug="$(printf '%s' "$request" | cut -d' ' -f1)"
-          wallet="$(printf '%s' "$request" | cut -d' ' -f2 | tr '[:upper:]' '[:lower:]')"
+          read -r slug wallet chain_id extra <<< "$request"
+          wallet="$(printf '%s' "$wallet" | tr '[:upper:]' '[:lower:]')"
+          chain_id="${chain_id:-8453}"
 
           if ! printf '%s' "$slug" | grep -Eq '^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$'; then
             # Not an attempt at a registration; leave ordinary issues alone.
@@ -64,6 +65,12 @@ jobs:
             exit 0
           fi
 
+          if [ -n "$extra" ] || { [ "$chain_id" != "8453" ] && [ "$chain_id" != "4663" ]; }; then
+            echo "status=invalid" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "chain_id=$chain_id" >> "$GITHUB_OUTPUT"
           echo "status=ok" >> "$GITHUB_OUTPUT"
           echo "slug=$slug" >> "$GITHUB_OUTPUT"
           echo "wallet=$wallet" >> "$GITHUB_OUTPUT"
@@ -162,9 +169,11 @@ jobs:
         id: register
         if: steps.control.outputs.status == 'ok'
         env:
-          RIK_ADDRESS: ${{ vars.FCF_RIK_ADDRESS }}
-          RPC_URL: ${{ vars.FCF_RPC_URL }}
-          REGISTRAR_PRIVATE_KEY: ${{ secrets.FCF_REGISTRAR_PRIVATE_KEY }}
+          # Select variable names, so missing Robinhood configuration cannot fall back to Base.
+          CHAIN_ID: ${{ steps.parse.outputs.chain_id }}
+          RIK_ADDRESS: ${{ vars[format('FCF_{0}RIK_ADDRESS', steps.parse.outputs.chain_id == '4663' && 'ROBINHOOD_' || '')] }}
+          RPC_URL: ${{ vars[format('FCF_{0}RPC_URL', steps.parse.outputs.chain_id == '4663' && 'ROBINHOOD_' || '')] }}
+          REGISTRAR_PRIVATE_KEY: ${{ secrets[format('FCF_{0}REGISTRAR_PRIVATE_KEY', steps.parse.outputs.chain_id == '4663' && 'ROBINHOOD_' || '')] }}
           WALLET: ${{ steps.parse.outputs.wallet }}
           REPO_ID: ${{ steps.repo.outputs.repo_id }}
           OWNER_ID: ${{ steps.repo.outputs.owner_id }}
@@ -176,6 +185,11 @@ jobs:
           # problem with the request. Report it as one rather than failing inside `cast`.
           if [ -z "${RIK_ADDRESS:-}" ] || [ -z "${RPC_URL:-}" ] || [ -z "${REGISTRAR_PRIVATE_KEY:-}" ]; then
             echo "status=unconfigured" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ "$(cast chain-id --rpc-url "$RPC_URL")" != "$CHAIN_ID" ]; then
+            echo "status=wrong-chain" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -240,6 +254,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           ISSUE: ${{ github.event.issue.number }}
+          CHAIN_ID: ${{ steps.parse.outputs.chain_id }}
           PARSE_STATUS: ${{ steps.parse.outputs.status }}
           REPO_STATUS: ${{ steps.repo.outputs.status }}
           CONTROL_STATUS: ${{ steps.control.outputs.status }}
@@ -254,7 +269,7 @@ jobs:
           set -euo pipefail
 
           if [ "$PARSE_STATUS" = "invalid" ]; then
-            body="That title did not parse. Use \`<owner>/<repo> <0xwallet>\`, for example \`octocat/Hello-World 0x1111111111111111111111111111111111111111\`."
+            body="That title did not parse. Use \`<owner>/<repo> <0xwallet> [8453|4663]\`, for example \`octocat/Hello-World 0x1111111111111111111111111111111111111111\`."
           elif [ "$REPO_STATUS" != "ok" ]; then
             body="Could not read \`$SLUG\`. It has to exist and be public, unless the fcf GitHub App is installed on it."
           elif [ "$CONTROL_STATUS" != "ok" ]; then
@@ -271,11 +286,13 @@ jobs:
           TEXT
           )
           elif [ "$REGISTER_STATUS" = "unconfigured" ]; then
-            body="Control of \`$SLUG\` was confirmed via \`$CONTROL_METHOD\`, but this repository has no registry configured yet, so nothing was submitted. Re-open once \`FCF_RIK_ADDRESS\`, \`FCF_RPC_URL\` and \`FCF_REGISTRAR_PRIVATE_KEY\` are set."
+            body="Control of \`$SLUG\` was confirmed via \`$CONTROL_METHOD\`, but chain $CHAIN_ID has no registrar configured yet, so nothing was submitted. Configure its RIK address, RPC URL and registrar key; Robinhood uses the FCF_ROBINHOOD_ variable prefix."
+          elif [ "$REGISTER_STATUS" = "wrong-chain" ]; then
+            body="The configured RPC does not serve chain $CHAIN_ID. Nothing was submitted. Correct the registrar configuration before retrying."
           elif [ "$REGISTER_STATUS" = "rejected" ]; then
             body=$(printf 'Control confirmed via `%s`, but the chain rejected the registration:\n\n```\n%s\n```' "$CONTROL_METHOD" "$REGISTER_REASON")
           elif [ "$REGISTER_STATUS" = "ok" ]; then
-            body="Registered \`$SLUG\` to \`$WALLET\`, proven via \`$CONTROL_METHOD\`. Transaction: \`$TX\`"
+            body="Registered \`$SLUG\` to \`$WALLET\`, proven via \`$CONTROL_METHOD\` on chain $CHAIN_ID. Transaction: \`$TX\`"
           else
             body="Something went wrong before the registration ran. Check the workflow logs."
           fi
